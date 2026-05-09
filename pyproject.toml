@@ -1,0 +1,40 @@
+[project]
+name = "read-screen-tool"
+version = "0.1.0"
+description = "LLM-powered screen reading assistant with transparent overlay"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "PySide6>=6.8.0",
+    "pynput>=1.7.7",
+    "mss>=10.0.0",
+    "paddleocr>=3.0.0",
+    "openai>=1.70.0",
+    "tiktoken>=0.8.0",
+    "pystray>=0.19.5",
+    "pillow>=11.0.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-qt>=4.4",
+    "ruff>=0.8",
+]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "SIM"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"
