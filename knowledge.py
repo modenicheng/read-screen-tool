@@ -1,8 +1,6 @@
 """Knowledge base grep tool for the read-screen-tool application."""
 
-import re
 from pathlib import Path
-from typing import Dict, List, Tuple
 
 
 def grep_knowledge(
@@ -27,14 +25,14 @@ def grep_knowledge(
     if not knowledge_path.is_dir():
         return "Knowledge directory not found."
 
-    txt_files: List[Path] = list(knowledge_path.glob("*.txt"))
+    txt_files: list[Path] = list(knowledge_path.glob("*.txt"))
     txt_files.extend(knowledge_path.glob("*/*.txt"))
 
     if not txt_files:
         return "No matches found."
 
     pattern_lower = pattern.lower()
-    results: List[str] = []
+    results: list[str] = []
     total_matches = 0
 
     for txt_file in sorted(txt_files):
@@ -46,7 +44,7 @@ def grep_knowledge(
         except (OSError, UnicodeDecodeError):
             continue
 
-        file_matches: List[Tuple[int, str]] = []
+        file_matches: list[tuple[int, str]] = []
         for i, line in enumerate(lines):
             if pattern_lower in line.lower():
                 file_matches.append((i, line))
@@ -78,7 +76,7 @@ def grep_knowledge(
     return "\n".join(results)
 
 
-def get_grep_tool_definition() -> Dict:
+def get_grep_tool_definition() -> dict:
     """Return an OpenAI-compatible function tool definition for grep_knowledge.
 
     Returns:
@@ -88,7 +86,10 @@ def get_grep_tool_definition() -> Dict:
         "type": "function",
         "function": {
             "name": "grep_knowledge",
-            "description": "Search text files in the knowledge base using grep. Returns matching lines with context.",
+            "description": (
+                "Search text files in the knowledge base using grep. "
+                "Returns matching lines with context."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {

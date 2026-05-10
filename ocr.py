@@ -1,9 +1,20 @@
 """OCR engine wrapper using PaddleOCR v3.x."""
 
 import logging
-from typing import Optional
+import os
+from typing import Any
 
 import numpy as np
+
+# Disable PaddlePaddle oneDNN at C++ inference level.
+# PaddlePaddle 3.3.0 regression (#77340): PIR executor crashes on oneDNN instruction
+# conversion with pir::ArrayAttribute<pir::DoubleAttribute> in onednn_instruction.cc:118.
+# enable_mkldnn=False on PaddleOCR only sets run_mode="paddle" — PIR executor still
+# compiles oneDNN ops internally. Disabling PIR entirely avoids the crash path.
+os.environ.setdefault("FLAGS_use_mkldnn", "0")
+os.environ.setdefault("FLAGS_enable_pir_in_executor", "0")
+os.environ.setdefault("FLAGS_enable_pir_api", "0")
+os.environ.setdefault("FLAGS_allocator_strategy", "naive_best_fit")
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +34,7 @@ class OcrEngine:
         """
         self._language = language
         self._device = device
-        self._ocr: object = None
+        self._ocr: Any = None
 
     @property
     def is_loaded(self) -> bool:
@@ -33,12 +44,10 @@ class OcrEngine:
     def _ensure_loaded(self):
         """Load PaddleOCR model if not already loaded."""
         if self._ocr is None:
-            logger.info(
-                f"Loading PaddleOCR (lang={self._language}, device={self._device})..."
-            )
+            logger.info(f"Loading PaddleOCR (lang={self._language}, device={self._device})...")
             from paddleocr import PaddleOCR
-            self._ocr = PaddleOCR(lang=self._language,
-                                  use_gpu=(self._device == "gpu"))
+
+            self._ocr = PaddleOCR(lang=self._language, device=self._device, enable_mkldnn=False)
             logger.info("PaddleOCR loaded successfully.")
 
     def recognize(self, image: np.ndarray) -> str:
@@ -80,13 +89,12 @@ class OcrEngine:
 
     def recognize_from_pil(self, image) -> str:
         """Recognize text from a PIL Image.
-        
+
         Args:
             image: PIL.Image object
-            
+
         Returns:
             Extracted text string
         """
-        # Convert PIL to numpy
         arr = np.array(image)
         return self.recognize(arr)

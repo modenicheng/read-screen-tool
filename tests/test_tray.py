@@ -1,7 +1,8 @@
 """Tests for system tray manager."""
 
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
 from PIL import Image
 
 
@@ -54,9 +55,11 @@ class TestTrayStartStop:
         """start() should create pystray.Icon and start thread."""
         mock_icon = MagicMock()
 
-        with patch("pystray.Icon", return_value=mock_icon) as mock_icon_cls:
-            with patch("threading.Thread") as mock_thread:
-                tray_manager.start()
+        with (
+            patch("pystray.Icon", return_value=mock_icon) as mock_icon_cls,
+            patch("threading.Thread") as mock_thread,
+        ):
+            tray_manager.start()
 
         assert mock_icon_cls.called
         mock_thread.assert_called_once()

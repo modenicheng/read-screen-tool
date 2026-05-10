@@ -1,27 +1,88 @@
-"""Transparent frameless always-on-top floating output window for LLM responses."""
+"""Transparent frameless always-on-top overlay, reimplemented with tkinter."""
 
-from __future__ import annotations
+import html.parser
+import logging
+import tkinter as tk
 
-from typing import List
+from signals import Signal
 
-from PySide6.QtCore import Qt, QPoint, QRect, Signal
-from PySide6.QtGui import QPainter, QColor, QFont, QFontMetrics, QPen, QMouseEvent
-from PySide6.QtWidgets import QWidget
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Module-level shared Tk root
+# ---------------------------------------------------------------------------
+
+_root: tk.Tk | None = None
 
 
-class OutputOverlay(QWidget):
-    """Transparent floating window displaying LLM response text.
+def _get_root() -> tk.Tk:
+    """Return the singleton hidden Tk root, creating it on first call."""
+    global _root
+    if _root is None:
+        _root = tk.Tk()
+        _root.withdraw()  # Never show the root window
+    return _root
 
-    Features:
-    - No background, no title bar, no taskbar icon
-    - Text with shadow for readability
-    - Alt+mouse drag to move, Alt+right-drag to resize
-    - Ctrl+Shift+Z toggles visibility (via external hotkey)
-    - Horizontal rule between replies
-    - Selectable text
-    """
 
-    text_added = Signal(str)  # emits newly added text
+# ---------------------------------------------------------------------------
+# Markdown HTML → tk.Text tag parser
+# ---------------------------------------------------------------------------
+
+
+class _MarkdownHTMLParser(html.parser.HTMLParser):
+    """Parse markdown HTML into tagged inserts for tk.Text."""
+
+    def __init__(self, text_widget: tk.Text):
+        super().__init__()
+        self._text = text_widget
+        self._tag_stack: list[str] = []
+        self._index = "end-1c"
+
+    def handle_starttag(self, tag: str, attrs):
+        if tag in ("h1", "h2", "h3"):
+            self._text.insert("end", "\n")
+        elif tag == "strong":
+            self._tag_stack.append("bold")
+        elif tag == "em":
+            self._tag_stack.append("italic")
+        elif tag == "code":
+            self._tag_stack.append("code")
+        elif tag == "pre":
+            self._tag_stack.append("code_block")
+        elif tag == "li":
+            self._text.insert("end", "\n  • ")
+
+    def handle_endtag(self, tag: str):
+        if tag in ("h1", "h2", "h3"):
+            self._text.insert("end", "\n")
+        elif (
+            tag in ("strong", "em", "code", "pre")
+            and self._tag_stack
+            and self._tag_stack[-1] in ("bold", "italic", "code", "code_block")
+        ):
+            self._tag_stack.pop()
+
+    def handle_data(self, data: str):
+        tag = self._tag_stack[-1] if self._tag_stack else None
+        if tag in ("code_block", "code"):
+            self._text.insert("end", data, ("mono",))
+        elif tag == "bold":
+            self._text.insert("end", data, ("bold",))
+        elif tag == "italic":
+            self._text.insert("end", data, ("italic",))
+        else:
+            self._text.insert("end", data)
+
+
+# ---------------------------------------------------------------------------
+# OutputOverlay — transparent frameless always-on-top text overlay
+# ---------------------------------------------------------------------------
+
+
+class OutputOverlay:
+    """Transparent frameless always-on-top text overlay."""
+
+    text_added = Signal(str)
 
     def __init__(
         self,
@@ -31,185 +92,203 @@ class OutputOverlay(QWidget):
         font_color: str = "#FFFFFF",
         shadow: bool = True,
     ):
-        super().__init__(parent)
+        self._root = _get_root()
+        self._window = tk.Toplevel(self._root)
 
-        # Window flags
-        self.setWindowFlags(
-            Qt.FramelessWindowHint
-            | Qt.WindowStaysOnTopHint
-            | Qt.Tool
-            | Qt.NoDropShadowWindowHint
-        )
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        # Frameless, always-on-top
+        self._window.overrideredirect(True)
+        self._window.wm_attributes("-topmost", True)
 
-        # Text buffer -- list of text blocks (each block = one reply)
-        self._text_blocks: List[str] = []
+        # Overall window transparency (0.0 = invisible, 1.0 = opaque)
+        # Using alpha instead of color-key to avoid click-through on Windows
+        self._window.configure(bg="#1e1e1e")
+        self._window.wm_attributes("-alpha", 0.12)
 
-        # Font config
+        # Font / color config (exposed for tests)
         self._font_family = font_family
         self._font_size = font_size
-        self._font_color = QColor(font_color)
+        self._font_color = font_color
         self._shadow_enabled = shadow
+        self._shadow_effect = None  # tkinter has no QGraphicsDropShadow equivalent
 
-        # Drag state
-        self._dragging = False
-        self._resizing = False
-        self._drag_start_pos = QPoint()
-        self._alt_held = False
+        # Text widget — fills entire window
+        self._text_widget = tk.Text(
+            self._window,
+            bg="#1e1e1e",
+            fg=font_color,
+            font=(font_family, font_size),
+            wrap=tk.WORD,
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            padx=8,
+            pady=8,
+            cursor="arrow",
+            state=tk.DISABLED,
+        )
+        self._text_widget.pack(fill=tk.BOTH, expand=True)
 
-        # Set default size
-        self.resize(600, 400)
-        self.move(100, 100)
+        # Text tags for markdown styling
+        self._text_widget.tag_configure("bold", font=(font_family, font_size, "bold"))
+        self._text_widget.tag_configure("italic", font=(font_family, font_size, "italic"))
+        self._text_widget.tag_configure("mono", font=("Consolas", font_size))
 
-        # Enable mouse tracking for Alt+drag detection
-        self.setMouseTracking(True)
+        # Buffer for streaming text
+        self._text_blocks: list[str] = [""]
 
-    def append_text(self, text: str) -> None:
-        """Append text to the current (last) text block."""
-        if not self._text_blocks:
-            self._text_blocks.append("")
-        self._text_blocks[-1] += text
-        self.text_added.emit(text)
-        self.update()
+        # Default geometry
+        self._window.geometry("600x400+100+100")
 
-    def add_separator(self) -> None:
-        """Add a horizontal rule separator between replies."""
-        self._text_blocks.append("")
-        self.update()
+        # Show by default (matches Qt original behavior)
+        self._visible = True
+        self._window.deiconify()
+        self._root.update_idletasks()
 
-    def clear(self) -> None:
-        """Clear all text blocks."""
-        self._text_blocks.clear()
-        self.update()
+    # -----------------------------------------------------------------------
+    # Visibility
+    # -----------------------------------------------------------------------
+
+    def show(self) -> None:
+        """Show the overlay window.
+
+        Uses alpha instead of withdraw/deiconify because on Windows,
+        ``deiconify()`` cannot restore ``overrideredirect(True)`` windows
+        after ``withdraw()`` (the WM doesn't track them).
+        """
+        self._visible = True
+        self._window.wm_attributes("-alpha", 0.82)
+        self._root.update_idletasks()
+        logger.info("[OVERLAY] show() — alpha=%.2f, visible=%s", 0.82, self._visible)
+
+    def hide(self) -> None:
+        """Hide the overlay window.
+
+        Sets alpha to 0 instead of ``withdraw()`` — see :meth:`show`.
+        """
+        self._visible = False
+        self._window.wm_attributes("-alpha", 0.0)
+        self._root.update_idletasks()
+        logger.info("[OVERLAY] hide() — alpha=%.2f, visible=%s", 0.0, self._visible)
+
+    def isVisible(self) -> bool:  # noqa: N802
+        """Return whether the overlay window is currently visible."""
+        return self._visible
 
     def toggle_visibility(self) -> None:
-        """Toggle window visibility."""
+        """Toggle the overlay window between visible and hidden."""
+        logger.info("[OVERLAY] toggle_visibility() — current visible=%s", self._visible)
         if self.isVisible():
             self.hide()
         else:
             self.show()
 
+    def close(self) -> None:
+        """Destroy the overlay window."""
+        self._window.destroy()
+
+    # -----------------------------------------------------------------------
+    # Text content
+    # -----------------------------------------------------------------------
+
+    def append_text(self, text: str) -> None:
+        """Append text to the current (last) text block.
+
+        Streaming-friendly: each call accumulates into the same block
+        until ``add_separator()`` starts a new one.
+        """
+        is_md = self._is_markdown(text)
+
+        # Enable widget for insert
+        self._text_widget.configure(state=tk.NORMAL)
+
+        if is_md:
+            self._render_markdown(text)
+        else:
+            self._text_widget.insert("end", text)
+            self._text_widget.see("end")
+
+        self._text_widget.configure(state=tk.DISABLED)
+
+        # Buffer management
+        if not self._text_blocks:
+            self._text_blocks = [""]
+        self._text_blocks[-1] += text
+        self._root.update_idletasks()
+        self.text_added.emit(text)
+
+    def add_separator(self) -> None:
+        """Add a horizontal separator line between text blocks."""
+        self._text_widget.configure(state=tk.NORMAL)
+        self._text_widget.insert("end", "\n")
+        self._text_widget.see("end")
+        self._text_widget.configure(state=tk.DISABLED)
+        self._text_blocks.append("")
+
+    def clear(self) -> None:
+        """Clear all text blocks and reset the widget."""
+        self._text_widget.configure(state=tk.NORMAL)
+        self._text_widget.delete("1.0", "end")
+        self._text_widget.configure(state=tk.DISABLED)
+        self._text_blocks.clear()
+
+    # -----------------------------------------------------------------------
+    # Markdown
+    # -----------------------------------------------------------------------
+
+    @staticmethod
+    def _is_markdown(text: str) -> bool:
+        """Detect whether *text* contains markdown syntax."""
+        return (
+            text.startswith("#")
+            or text.startswith("*")
+            or text.startswith("`")
+            or text.startswith(">")
+            or text.startswith("- ")
+            or "**" in text
+            or "*" in text
+            or "`" in text
+        )
+
+    def _render_markdown(self, text: str) -> None:
+        """Convert markdown to HTML, then parse into tagged tk.Text inserts."""
+        try:
+            import markdown
+
+            html_str = markdown.markdown(text, extensions=["fenced_code", "tables"])
+        except ImportError:
+            # Fallback: plain text if markdown library unavailable
+            self._text_widget.insert("end", text)
+            self._text_widget.see("end")
+            return
+
+        parser = _MarkdownHTMLParser(self._text_widget)
+        parser.feed(html_str)
+        self._text_widget.see("end")
+
+    # -----------------------------------------------------------------------
+    # Window geometry
+    # -----------------------------------------------------------------------
+
     def set_position(self, x: int, y: int) -> None:
-        """Move window to position."""
-        self.move(x, y)
+        """Move the overlay window to (*x*, *y*) screen coordinates."""
+        geo = self._window.geometry()
+        size_part = geo.split("+")[0] if "+" in geo else "600x400"
+        self._window.geometry(f"{size_part}+{x}+{y}")
+        self._root.update_idletasks()
 
     def set_size(self, w: int, h: int) -> None:
-        """Resize window."""
-        self.resize(w, h)
+        """Resize the overlay window to *w* × *h* pixels, preserving position."""
+        current = self._window.geometry()
+        parts = current.split("+")
+        x = parts[1] if len(parts) > 1 else "100"
+        y = parts[2] if len(parts) > 2 else "100"
+        self._window.geometry(f"{w}x{h}+{x}+{y}")
+        self._root.update_idletasks()
 
-    def paintEvent(self, event):  # noqa: N802
-        """Paint text blocks with shadow effect."""
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.setRenderHint(QPainter.TextAntialiasing, True)
+    def move_to_cursor(self, x: int, y: int) -> None:
+        """Move the overlay window to the cursor position (*x*, *y*)."""
+        self.set_position(x, y)
 
-        font = QFont(self._font_family, self._font_size)
-        painter.setFont(font)
-        metrics = QFontMetrics(font)
-        line_height = metrics.height() + 4
-
-        y = 10
-        margin = 10
-        max_width = self.width() - 2 * margin
-
-        for i, block in enumerate(self._text_blocks):
-            if i > 0 and block == "":
-                # Draw separator line
-                painter.setPen(QPen(QColor(255, 255, 255, 80), 1))
-                painter.drawLine(margin, y + 4, self.width() - margin, y + 4)
-                y += 12
-                continue
-
-            if not block:
-                continue
-
-            # Draw text with shadow
-            if self._shadow_enabled:
-                painter.setPen(QColor(0, 0, 0, 160))
-                self._draw_text_block(painter, block, margin + 1, y + 1, max_width, line_height)
-
-            painter.setPen(self._font_color)
-            self._draw_text_block(painter, block, margin, y, max_width, line_height)
-
-            # Calculate vertical advance
-            text_rect = metrics.boundingRect(
-                QRect(margin, y, max_width, 0),
-                Qt.TextWordWrap | Qt.AlignLeft,
-                block,
-            )
-            y += max(text_rect.height(), line_height) + 4
-
-    def _draw_text_block(
-        self,
-        painter: QPainter,
-        text: str,
-        x: int,
-        y: int,
-        max_width: int,
-        line_height: int,  # noqa: ARG002
-    ) -> None:
-        """Draw a single text block with word wrapping."""
-        rect = QRect(x, y, max_width, 0)
-        painter.drawText(rect, Qt.TextWordWrap | Qt.AlignLeft, text)
-
-    def keyPressEvent(self, event):  # noqa: N802
-        """Track Alt key for drag detection."""
-        if event.key() == Qt.Key_Alt:
-            self._alt_held = True
-            event.accept()
-        else:
-            super().keyPressEvent(event)
-
-    def keyReleaseEvent(self, event):  # noqa: N802
-        """Track Alt key release."""
-        if event.key() == Qt.Key_Alt:
-            self._alt_held = False
-            self._dragging = False
-            self._resizing = False
-            event.accept()
-        else:
-            super().keyReleaseEvent(event)
-
-    def mousePressEvent(self, event: QMouseEvent):  # noqa: N802
-        """Start drag/resize when Alt is held."""
-        if self._alt_held:
-            if event.button() == Qt.LeftButton:
-                self._dragging = True
-                self._drag_start_pos = event.globalPos() - self.frameGeometry().topLeft()
-                self.setCursor(Qt.ClosedHandCursor)
-            elif event.button() == Qt.RightButton:
-                self._resizing = True
-                self._drag_start_pos = event.globalPos()
-            event.accept()
-        else:
-            super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event: QMouseEvent):  # noqa: N802
-        """Move/resize while dragging."""
-        if self._dragging:
-            delta = (
-                event.globalPos()
-                - self._drag_start_pos
-                - self.frameGeometry().topLeft()
-            )
-            self.move(self.pos() + delta)
-            self._drag_start_pos = event.globalPos() - self.frameGeometry().topLeft()
-        elif self._resizing:
-            delta = event.globalPos() - self._drag_start_pos
-            new_w = max(200, self.width() + delta.x())
-            new_h = max(100, self.height() + delta.y())
-            self.resize(new_w, new_h)
-            self._drag_start_pos = event.globalPos()
-        else:
-            super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event: QMouseEvent):  # noqa: N802
-        """End drag/resize."""
-        if self._dragging:
-            self._dragging = False
-            self.setCursor(Qt.ArrowCursor)
-        elif self._resizing:
-            self._resizing = False
-        else:
-            super().mouseReleaseEvent(event)
+    def pump(self) -> None:
+        """Process pending tkinter events. Call from Qt timer (~30ms)."""
+        self._root.update()

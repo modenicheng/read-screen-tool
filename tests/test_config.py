@@ -1,21 +1,22 @@
 """Tests for the configuration module."""
 
-import yaml
-import pytest
 from pathlib import Path
 
+import pytest
+import yaml
+
 from config import (
-    AppConfig,
-    ProviderConfig,
+    FontConfig,
+    KnowledgeConfig,
     ModelConfig,
     OcrConfig,
-    ScreenshotConfig,
     OutputWindowConfig,
-    FontConfig,
+    OverlayConfig,
     PositionConfig,
+    ProviderConfig,
+    ScreenshotConfig,
     SizeConfig,
     SystrayConfig,
-    KnowledgeConfig,
     load_config,
 )
 
@@ -60,6 +61,9 @@ class TestLoadConfig:
         assert isinstance(cfg.systray, SystrayConfig)
         assert cfg.systray.show_icon is True
 
+        assert isinstance(cfg.overlay, OverlayConfig)
+        assert cfg.overlay.toggle_hotkey == "ctrl+alt+a"
+
         assert isinstance(cfg.knowledge, KnowledgeConfig)
         assert cfg.knowledge.enabled is True
         assert cfg.knowledge.directory == "knowledge"
@@ -70,9 +74,7 @@ class TestLoadConfig:
             "provider": [
                 {"name": "test-provider", "api_key": "key", "base_url": "https://example.com"}
             ],
-            "models": [
-                {"name": "test-model", "provider": "test-provider"}
-            ],
+            "models": [{"name": "test-model", "provider": "test-provider"}],
         }
         cfg_path = temp_dir / "minimal.yaml"
         with open(cfg_path, "w", encoding="utf-8") as f:
@@ -103,6 +105,8 @@ class TestLoadConfig:
         assert cfg.output_window.shadow is True
 
         assert cfg.systray.show_icon is True
+
+        assert cfg.overlay.toggle_hotkey == "ctrl+alt+a"
 
         assert cfg.knowledge.enabled is True
         assert cfg.knowledge.directory == "knowledge"
@@ -152,6 +156,22 @@ class TestLoadConfig:
         with pytest.raises(ValueError, match="default_model.*ghost-model"):
             load_config(bad)
 
+    def test_extra_unknown_fields_loads(self, temp_dir: Path) -> None:
+        """Config with extra unknown top-level keys still loads (forward compat)."""
+        config_with_extras = {
+            "provider": [{"name": "p", "api_key": "k", "base_url": "https://example.com"}],
+            "models": [{"name": "m", "provider": "p"}],
+            "future_feature": True,
+            "experimental": {"nested": "value"},
+        }
+        cfg_path = temp_dir / "extra_fields.yaml"
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            yaml.dump(config_with_extras, f)
+
+        cfg = load_config(cfg_path)
+        assert cfg.providers[0].name == "p"
+        assert cfg.models[0].name == "m"
+
 
 class TestProviders:
     """Tests for provider lookup."""
@@ -192,17 +212,20 @@ class TestModels:
         assert cfg.get_model("nonexistent") is None
 
 
-class TestDefaultModel:
-    """Tests for get_default_model()."""
+class TestActiveModel:
+    """Tests for get_active_model()."""
 
-    def test_get_default_model_explicit(self, sample_config_path: Path) -> None:
-        """When default_model is set, get_default_model returns that model."""
+    def test_get_active_model_explicit(self, sample_config_path: Path) -> None:
+        """When default_model is set, returns that model and its provider."""
         cfg = load_config(sample_config_path)
-        model = cfg.get_default_model()
+        model, provider = cfg.get_active_model()
         assert model.name == "deepseek-v4-pro"
+        assert provider.name == "deepseek"
+        assert provider.api_key == "sk-test-key"
+        assert provider.base_url == "https://api.deepseek.com"
 
-    def test_get_default_model_implicit(self, temp_dir: Path) -> None:
-        """When default_model is not set, get_default_model returns the first model."""
+    def test_get_active_model_implicit(self, temp_dir: Path) -> None:
+        """When default_model is not set, returns the first model and its provider."""
         cfg_dict = {
             "provider": [
                 {"name": "p1", "api_key": "k", "base_url": "u"},
@@ -217,8 +240,9 @@ class TestDefaultModel:
             yaml.dump(cfg_dict, f)
 
         cfg = load_config(cfg_path)
-        model = cfg.get_default_model()
+        model, provider = cfg.get_active_model()
         assert model.name == "alpha"
+        assert provider.name == "p1"
 
 
 class TestRoundTrip:
@@ -246,6 +270,7 @@ class TestRoundTrip:
                 "shadow": False,
             },
             "systray": {"show_icon": False},
+            "overlay": {"toggle_hotkey": "ctrl+shift+z"},
             "knowledge": {"enabled": False, "directory": "custom_kb"},
         }
 
@@ -292,6 +317,8 @@ class TestRoundTrip:
         assert cfg.output_window.shadow is False
 
         assert cfg.systray.show_icon is False
+
+        assert cfg.overlay.toggle_hotkey == "ctrl+shift+z"
 
         assert cfg.knowledge.enabled is False
         assert cfg.knowledge.directory == "custom_kb"

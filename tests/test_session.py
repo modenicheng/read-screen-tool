@@ -1,7 +1,5 @@
 """Tests for the conversation session module."""
 
-import pytest
-
 from session import ConversationSession
 
 
@@ -129,7 +127,9 @@ class TestTokenCount:
         session.add_message(
             "assistant",
             "Let me check.",
-            tool_calls=[{"id": "call_1", "function": {"name": "search", "arguments": '{"q":"test"}'}}],
+            tool_calls=[
+                {"id": "call_1", "function": {"name": "search", "arguments": '{"q":"test"}'}}
+            ],
         )
         count = session.token_count()
         assert count > 0
@@ -186,7 +186,10 @@ class TestCompress:
         session = ConversationSession(context_size=200)
         # Add many messages to fill up context
         for i in range(20):
-            session.add_message("user", f"Message number {i} with some extra text to fill tokens. " * 3)
+            session.add_message(
+                "user",
+                f"Message number {i} with some extra text to fill tokens. " * 3,
+            )
         original_count = session.message_count
         summary = session.compress()
         assert session.message_count < original_count

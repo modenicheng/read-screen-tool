@@ -1,7 +1,7 @@
 """System tray icon manager using pystray."""
 
 import logging
-from typing import Optional
+from typing import Any
 
 from PySide6.QtCore import QObject, Signal
 
@@ -53,7 +53,7 @@ class TrayManager(QObject):
     def __init__(
         self,
         show_icon: bool = True,
-        icon: Optional[object] = None,
+        icon: object | None = None,
         tooltip: str = "Read Screen Tool",
     ):
         """Initialize tray manager.
@@ -67,7 +67,7 @@ class TrayManager(QObject):
         self._show_icon = show_icon
         self._icon = icon if icon else _create_default_icon()
         self._tooltip = tooltip
-        self._tray: Optional[object] = None
+        self._tray: Any = None
         self._running = False
 
     def start(self):
@@ -77,8 +77,9 @@ class TrayManager(QObject):
             return
 
         try:
-            import pystray
             import threading
+
+            import pystray
 
             # Build menu
             menu = pystray.Menu(

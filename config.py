@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 import yaml
 
@@ -67,6 +66,11 @@ class SystrayConfig:
 
 
 @dataclass
+class OverlayConfig:
+    toggle_hotkey: str = "ctrl+alt+a"
+
+
+@dataclass
 class KnowledgeConfig:
     enabled: bool = True
     directory: str = "knowledge"
@@ -82,29 +86,49 @@ class AppConfig:
     screenshot: ScreenshotConfig = field(default_factory=ScreenshotConfig)
     output_window: OutputWindowConfig = field(default_factory=OutputWindowConfig)
     systray: SystrayConfig = field(default_factory=SystrayConfig)
+    overlay: OverlayConfig = field(default_factory=OverlayConfig)
     knowledge: KnowledgeConfig = field(default_factory=KnowledgeConfig)
 
-    def get_provider(self, name: str) -> Optional[ProviderConfig]:
+    def get_provider(self, name: str) -> ProviderConfig | None:
         """Look up a provider by name. Returns None if not found."""
         for p in self.providers:
             if p.name == name:
                 return p
         return None
 
-    def get_model(self, name: str) -> Optional[ModelConfig]:
+    def get_model(self, name: str) -> ModelConfig | None:
         """Look up a model by name. Returns None if not found."""
         for m in self.models:
             if m.name == name:
                 return m
         return None
 
-    def get_default_model(self) -> ModelConfig:
-        """Return the model matching default_model, or the first model."""
+    def get_active_model(self) -> tuple[ModelConfig, ProviderConfig]:
+        """Return the active model and its provider based on ``default_model``.
+
+        Returns:
+            A tuple of ``(model, provider)``.  If ``default_model`` is set,
+            the matching model is used; otherwise the first model is returned.
+
+        Raises:
+            ValueError: If the provider referenced by the model cannot be found.
+        """
         if self.default_model:
             model = self.get_model(self.default_model)
-            if model is not None:
-                return model
-        return self.models[0]
+            if model is None:
+                raise ValueError(
+                    f"default_model '{self.default_model}' not found among configured models"
+                )
+        else:
+            model = self.models[0]
+
+        provider = self.get_provider(model.provider)
+        if provider is None:
+            raise ValueError(
+                f"Provider '{model.provider}' referenced by model '{model.name}' not found"
+            )
+
+        return model, provider
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +166,10 @@ def _build_systray(data: dict) -> SystrayConfig:
     return SystrayConfig(**data)
 
 
+def _build_overlay(data: dict) -> OverlayConfig:
+    return OverlayConfig(**data)
+
+
 def _build_knowledge(data: dict) -> KnowledgeConfig:
     return KnowledgeConfig(**data)
 
@@ -170,7 +198,7 @@ def load_config(path: str | Path = "config.yaml") -> AppConfig:
         raise FileNotFoundError(f"Config file not found: {path}")
 
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             raw: dict = yaml.safe_load(f)
     except yaml.YAMLError:
         raise
@@ -198,6 +226,7 @@ def load_config(path: str | Path = "config.yaml") -> AppConfig:
     screenshot = _build_screenshot(raw.pop("screenshot", {}))
     output_window = _build_output_window(raw.pop("output_window", {}))
     systray = _build_systray(raw.pop("systray", {}))
+    overlay = _build_overlay(raw.pop("overlay", {}))
     knowledge = _build_knowledge(raw.pop("knowledge", {}))
 
     app = AppConfig(
@@ -209,13 +238,12 @@ def load_config(path: str | Path = "config.yaml") -> AppConfig:
         screenshot=screenshot,
         output_window=output_window,
         systray=systray,
+        overlay=overlay,
         knowledge=knowledge,
     )
 
     # Validate default_model if set
     if app.default_model and app.get_model(app.default_model) is None:
-        raise ValueError(
-            f"default_model '{app.default_model}' does not match any configured model"
-        )
+        raise ValueError(f"default_model '{app.default_model}' does not match any configured model")
 
     return app

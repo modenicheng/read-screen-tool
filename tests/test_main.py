@@ -216,15 +216,21 @@ class TestSignalWiring:
         )
 
     def test_toggle_overlay_connected(self, orchestrator):
-        """HotkeyManager.toggle_overlay_requested → OutputOverlay.toggle_visibility."""
+        """HotkeyManager.toggle_overlay_requested → ReadScreenApp._toggle_overlay (bridge)."""
         orchestrator._hotkey.toggle_overlay_requested.connect.assert_called_with(
-            orchestrator._output_overlay.toggle_visibility
+            orchestrator._toggle_overlay
         )
 
-    def test_screenshot_taken_connected_to_process(self, orchestrator):
-        """ScreenshotOverlay.screenshot_taken → _process_screenshot."""
+    def test_move_overlay_connected(self, orchestrator):
+        """HotkeyManager.move_overlay_to_cursor → ReadScreenApp._move_overlay_to_cursor (bridge)."""
+        orchestrator._hotkey.move_overlay_to_cursor.connect.assert_called_with(
+            orchestrator._move_overlay_to_cursor
+        )
+
+    def test_screenshot_taken_connected_to_queue(self, orchestrator):
+        """ScreenshotOverlay.screenshot_taken → _queue_screenshot."""
         orchestrator._screenshot_overlay.screenshot_taken.connect.assert_called_with(
-            orchestrator._process_screenshot
+            orchestrator._queue_screenshot
         )
 
     def test_token_received_connected_to_append_text(self, orchestrator):
@@ -285,7 +291,7 @@ class TestSignalWiring:
             app = ReadScreenApp(app_config)
             # Should not crash; screenshot_taken wiring still works
             app._screenshot_overlay.screenshot_taken.connect.assert_called_with(
-                app._process_screenshot
+                app._queue_screenshot
             )
 
 
@@ -295,27 +301,29 @@ class TestSignalWiring:
 
 
 class TestScreenshotProcessing:
-    """Tests for _process_screenshot logic."""
+    """Tests for _queue_screenshot / async OCR pipeline logic."""
 
     def test_vision_model_sends_image_directly(self, orchestrator_vision):
         """When model has vision, image is sent directly with a prompt."""
         image = np.zeros((100, 100, 3), dtype=np.uint8)
-        orchestrator_vision._process_screenshot(image)
+        orchestrator_vision._queue_screenshot(image)
 
         orchestrator_vision._llm_client.send.assert_called_once()
         call_args = orchestrator_vision._llm_client.send.call_args
+        assert call_args[0][0]  # prompt non-empty
         assert call_args[1]["image"] is image
 
     def test_non_vision_model_runs_ocr(self, orchestrator):
-        """When model lacks vision, OCR is run before LLM call."""
+        """When model lacks vision, OCR runs async, then LLM is called."""
         ocr_text = "Hello from OCR"
-        orchestrator._ocr_engine.recognize.return_value = ocr_text
-
         image = np.zeros((100, 100, 3), dtype=np.uint8)
-        orchestrator._process_screenshot(image)
 
-        # OCR was called
-        orchestrator._ocr_engine.recognize.assert_called_once_with(image)
+        # Enqueue — OCR runs in worker thread; LLM NOT called yet
+        orchestrator._queue_screenshot(image)
+        orchestrator._llm_client.send.assert_not_called()
+
+        # Simulate OCR worker completion via signal
+        orchestrator._on_ocr_completed(ocr_text)
 
         # LLM was called with OCR text in prompt
         orchestrator._llm_client.send.assert_called_once()
@@ -324,10 +332,9 @@ class TestScreenshotProcessing:
 
     def test_non_vision_ocr_returns_empty_string(self, orchestrator):
         """When OCR returns empty, a fallback prompt is used."""
-        orchestrator._ocr_engine.recognize.return_value = ""
-
         image = np.zeros((100, 100, 3), dtype=np.uint8)
-        orchestrator._process_screenshot(image)
+        orchestrator._queue_screenshot(image)
+        orchestrator._on_ocr_completed("")
 
         orchestrator._llm_client.send.assert_called_once()
         prompt = orchestrator._llm_client.send.call_args[0][0]
@@ -335,24 +342,24 @@ class TestScreenshotProcessing:
 
     def test_non_vision_ocr_returns_whitespace_only(self, orchestrator):
         """When OCR returns only whitespace, fallback prompt is used."""
-        orchestrator._ocr_engine.recognize.return_value = "   \n  \t  "
-
         image = np.zeros((100, 100, 3), dtype=np.uint8)
-        orchestrator._process_screenshot(image)
+        orchestrator._queue_screenshot(image)
+        orchestrator._on_ocr_completed("   \n  \t  ")
 
         prompt = orchestrator._llm_client.send.call_args[0][0]
         assert "No text was detected" in prompt
 
-    def test_non_vision_without_ocr_engine(self, orchestrator_vision):
-        """If OCR engine is None but vision=False, fallback prompt is used."""
+    def test_non_vision_without_ocr_worker(self, orchestrator_vision):
+        """When _ocr_worker is None and vision=False, finish without LLM call."""
         orchestrator_vision._model.vision = False
-        orchestrator_vision._ocr_engine = None
+        orchestrator_vision._ocr_worker = None
 
         image = np.zeros((100, 100, 3), dtype=np.uint8)
-        orchestrator_vision._process_screenshot(image)
+        orchestrator_vision._queue_screenshot(image)
 
-        prompt = orchestrator_vision._llm_client.send.call_args[0][0]
-        assert "No text was detected" in prompt
+        # No OCR worker → no LLM call, queue is finished immediately
+        orchestrator_vision._llm_client.send.assert_not_called()
+        assert orchestrator_vision._processing is False
 
 
 # ---------------------------------------------------------------------------
@@ -512,10 +519,11 @@ class TestLifecycle:
         orchestrator._tray.start.assert_called_once()
 
     def test_stop_stops_hotkey_and_tray(self, orchestrator):
-        """stop() calls stop on hotkey and tray managers."""
+        """stop() calls stop on hotkey, tray, and llm_client."""
         orchestrator.stop()
         orchestrator._hotkey.stop.assert_called_once()
         orchestrator._tray.stop.assert_called_once()
+        orchestrator._llm_client.stop.assert_called_once()
 
     def test_start_without_hotkey(self, qtbot, app_config):
         """start() does not crash when hotkey is None."""
@@ -651,10 +659,11 @@ class TestIntegrationScenarios:
 
     def test_full_ocr_pipeline(self, orchestrator):
         """Simulate screenshot → OCR → LLM → separator flow."""
-        orchestrator._ocr_engine.recognize.return_value = "Screen text content."
-
         image = np.zeros((50, 50, 3), dtype=np.uint8)
-        orchestrator._process_screenshot(image)
+        orchestrator._queue_screenshot(image)
+
+        # OCR runs async — simulate completion
+        orchestrator._on_ocr_completed("Screen text content.")
 
         sent_prompt = orchestrator._llm_client.send.call_args[0][0]
         assert "Screen text content." in sent_prompt
@@ -663,7 +672,7 @@ class TestIntegrationScenarios:
     def test_full_vision_pipeline(self, orchestrator_vision):
         """Simulate screenshot → vision → LLM flow."""
         image = np.zeros((50, 50, 3), dtype=np.uint8)
-        orchestrator_vision._process_screenshot(image)
+        orchestrator_vision._queue_screenshot(image)
 
         call_kwargs = orchestrator_vision._llm_client.send.call_args
         assert call_kwargs[0][0]  # prompt non-empty
@@ -694,12 +703,18 @@ class TestIntegrationScenarios:
 
     def test_multiple_screenshots_accumulate_in_session(self, orchestrator):
         """Each screenshot call updates the same session (no clearing)."""
-        orchestrator._ocr_engine.recognize.return_value = "First capture"
-
         image = np.zeros((10, 10, 3), dtype=np.uint8)
-        orchestrator._process_screenshot(image)
-        orchestrator._ocr_engine.recognize.return_value = "Second capture"
-        orchestrator._process_screenshot(image)
+
+        # First screenshot → OCR → LLM
+        orchestrator._queue_screenshot(image)
+        orchestrator._on_ocr_completed("First capture")
+        # Finish processing to release the queue
+        orchestrator._on_response_complete("")
+        assert orchestrator._processing is False
+
+        # Second screenshot → OCR → LLM
+        orchestrator._queue_screenshot(image)
+        orchestrator._on_ocr_completed("Second capture")
 
         assert orchestrator._llm_client.send.call_count == 2
 

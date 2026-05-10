@@ -1,10 +1,11 @@
 """Tests for the knowledge base grep tool."""
 
-import pytest
+from collections.abc import Generator
 from pathlib import Path
-from typing import Generator
 
-from knowledge import grep_knowledge, get_grep_tool_definition
+import pytest
+
+from knowledge import get_grep_tool_definition, grep_knowledge
 
 
 @pytest.fixture
@@ -14,7 +15,7 @@ def real_knowledge_dir() -> str:
 
 
 @pytest.fixture
-def temp_knowledge_dir(tmp_path: Path) -> Generator[Path, None, None]:
+def temp_knowledge_dir(tmp_path: Path) -> Generator[Path]:
     """Create a temporary knowledge directory with a test file."""
     d = tmp_path / "knowledge"
     d.mkdir()
@@ -31,7 +32,7 @@ def temp_knowledge_dir(tmp_path: Path) -> Generator[Path, None, None]:
 
 
 @pytest.fixture
-def temp_multi_file_dir(tmp_path: Path) -> Generator[Path, None, None]:
+def temp_multi_file_dir(tmp_path: Path) -> Generator[Path]:
     """Create a temporary knowledge directory with multiple files."""
     d = tmp_path / "multi_knowledge"
     d.mkdir()
@@ -64,7 +65,7 @@ class TestGrepKnowledge:
         # Should have lines before the match
         lines = result.split("\n")
         # Find the line with >>>
-        match_line_idx = next(i for i, l in enumerate(lines) if ">>>" in l)
+        match_line_idx = next(i for i, line in enumerate(lines) if ">>>" in line)
         # There should be context lines before (non-empty)
         assert match_line_idx > 1  # File line info + at least one context line
 
@@ -86,16 +87,12 @@ class TestGrepKnowledge:
 
     def test_grep_respects_max_results(self, temp_knowledge_dir: Path) -> None:
         """Set max_results=1, verify only 1 result."""
-        result = grep_knowledge(
-            "quick", knowledge_dir=str(temp_knowledge_dir), max_results=1
-        )
+        result = grep_knowledge("quick", knowledge_dir=str(temp_knowledge_dir), max_results=1)
         assert result.count(">>>") == 1
 
     def test_grep_missing_directory(self) -> None:
         """Point to a nonexistent directory, verify error message."""
-        result = grep_knowledge(
-            "anything", knowledge_dir="nonexistent_dir_xyz"
-        )
+        result = grep_knowledge("anything", knowledge_dir="nonexistent_dir_xyz")
         assert result == "Knowledge directory not found."
 
     def test_grep_multiple_files(self, temp_multi_file_dir: Path) -> None:

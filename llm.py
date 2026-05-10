@@ -8,9 +8,27 @@ import logging
 import numpy as np
 from openai import OpenAI
 from PIL import Image
-from PySide6.QtCore import QMutex, QObject, QThread, Signal
+from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 logger = logging.getLogger(__name__)
+
+
+class _LlmWorker(QObject):
+    """Worker QObject that executes streaming requests on a persistent QThread.
+
+    Lives on a dedicated background thread.  Receives message lists via the
+    ``request`` signal and calls ``LlmClient._stream_request()`` synchronously.
+    """
+
+    request = Signal(list)  # messages: list[dict]
+
+    def __init__(self, client: "LlmClient", parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._client = client
+
+    @Slot(list)
+    def _on_request(self, messages: list[dict]) -> None:
+        self._client._stream_request(messages)
 
 
 class LlmClient(QObject):
@@ -52,13 +70,14 @@ class LlmClient(QObject):
         self._session = None  # ConversationSession, set externally
         self._system_prompt = ""
         self._current_model = ""
-        self._mutex = QMutex()
-
-        # Tool definitions (set by caller)
         self._tools: list[dict] = []
 
-        # Working thread
-        self._worker: QThread | None = None
+        # Persistent worker thread (created in configure())
+        self._request_thread: QThread | None = None
+        self._request_worker: _LlmWorker | None = None
+
+        # Auto-stop the worker thread when this object is destroyed
+        self.destroyed.connect(self.stop)
 
     def configure(
         self,
@@ -103,6 +122,16 @@ class LlmClient(QObject):
 
         self._client = OpenAI(api_key=api_key, base_url=base_url)
 
+        # --- Persistent worker thread ---------------------------------------
+        # A single thread processes all requests sequentially, avoiding the
+        # "QThread: Destroyed while thread is still running" crash that occurs
+        # when ad-hoc threads are overwritten without cleanup.
+        self._request_worker = _LlmWorker(self)
+        self._request_thread = QThread(self)
+        self._request_worker.moveToThread(self._request_thread)
+        self._request_worker.request.connect(self._request_worker._on_request)
+        self._request_thread.start()
+
     def send(
         self,
         user_text: str,
@@ -111,20 +140,35 @@ class LlmClient(QObject):
     ):
         """Send a message to the LLM.
 
-        Runs API call in a QThread to avoid blocking the Qt event loop.
+        Dispatches to the persistent worker thread via signal/slot.
 
         Args:
             user_text: User's text input
             image: Optional numpy array (H,W,3) of screenshot for vision
             system_prompt_override: Override system prompt for this request
         """
-        # Build messages
         messages = self._build_messages(user_text, image, system_prompt_override)
 
-        # Run in worker thread
-        self._worker = QThread()
-        self._worker.run = lambda: self._stream_request(messages)
-        self._worker.start()
+        # Save user message to session so tool-call continuations
+        # (``continue_after_tool``) include the original user prompt.
+        if self._session:
+            if image is not None:
+                img_b64 = self._encode_image(image)
+                self._session.add_message(
+                    role="user",
+                    content=[
+                        {"type": "text", "text": user_text},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{img_b64}"},
+                        },
+                    ],
+                )
+            else:
+                self._session.add_message(role="user", content=user_text)
+
+        if self._request_worker is not None:
+            self._request_worker.request.emit(messages)
 
     def _build_messages(
         self,
@@ -186,7 +230,7 @@ class LlmClient(QObject):
         return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
     def _stream_request(self, messages: list[dict]):
-        """Execute streaming API request in worker thread.
+        """Execute streaming API request (called on worker thread).
 
         Handles:
         - Regular content streaming
@@ -333,6 +377,7 @@ class LlmClient(QObject):
         """Continue the conversation after tool results have been submitted.
 
         Sends another request to let the model process tool results.
+        Dispatched to the persistent worker thread.
         """
         if self._session:
             messages: list[dict] = list(self._session.get_messages())
@@ -343,10 +388,16 @@ class LlmClient(QObject):
         if user_text:
             messages.append({"role": "user", "content": user_text})
 
-        # Run in worker thread
-        self._worker = QThread()
-        self._worker.run = lambda: self._stream_request(messages)
-        self._worker.start()
+        if self._request_worker:
+            self._request_worker.request.emit(messages)
+
+    def stop(self) -> None:
+        """Stop the persistent worker thread and clean up."""
+        if self._request_thread is not None and self._request_thread.isRunning():
+            self._request_thread.quit()
+            self._request_thread.wait(5000)
+            self._request_worker = None
+            self._request_thread = None
 
     def set_session(self, session):
         """Set the conversation session."""

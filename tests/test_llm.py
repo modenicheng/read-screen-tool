@@ -1197,8 +1197,8 @@ class TestSignals:
 class TestEdgeCases:
     """Edge cases and additional coverage."""
 
-    def test_send_starts_worker_thread(self, client, mock_openai):
-        """send() creates a QThread and starts it."""
+    def test_send_dispatches_to_worker(self, client, mock_openai):
+        """configure() creates persistent thread; send() dispatches to it."""
         session = MockSession()
         client.configure(
             provider_config={"api_key": "k", "base_url": "u"},
@@ -1206,15 +1206,19 @@ class TestEdgeCases:
             session=session,
         )
 
-        # Patch QThread to track start() calls
-        with patch("llm.QThread") as mock_thread_cls:
-            mock_thread = MagicMock()
-            mock_thread_cls.return_value = mock_thread
+        # Verify persistent worker infrastructure was created
+        assert client._request_worker is not None
+        assert client._request_thread is not None
+        assert client._request_thread.isRunning()
 
-            client.send("Hello")
+        # send() should not crash — it dispatches via signal to worker thread
+        client.send("Hello")
 
-            assert mock_thread_cls.called
-            assert mock_thread.start.called
+        # Tear down properly
+        thread = client._request_thread
+        client.stop()
+        assert thread is not None
+        assert not thread.isRunning()
 
     def test_configure_with_provider_config_dataclass(self, client, mock_openai):
         """configure() accepts a dataclass-like object with .api_key and .base_url."""

@@ -52,6 +52,9 @@ def sample_config_dict():
         "systray": {
             "show_icon": True,
         },
+        "overlay": {
+            "toggle_hotkey": "ctrl+alt+a",
+        },
         "knowledge": {
             "enabled": True,
             "directory": "knowledge",
