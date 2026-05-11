@@ -8,7 +8,13 @@ Provides:
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
+
+# Supported file extensions and their search strategies
+_STRUCTURED_EXTENSIONS = {".md", ".tex"}
+_TEXT_EXTENSIONS = {".txt"}
+_ALL_EXTENSIONS = _STRUCTURED_EXTENSIONS | _TEXT_EXTENSIONS
 
 
 def _validate_path(file_path: str, allowed_dirs: list[Path]) -> Path | None:
@@ -47,72 +53,275 @@ def _validate_path(file_path: str, allowed_dirs: list[Path]) -> Path | None:
         return None
 
 
+# ---------------------------------------------------------------------------
+# Section parsing for structured documents
+# ---------------------------------------------------------------------------
+
+# Markdown heading patterns
+_MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$")
+
+# LaTeX section commands (in order of depth)
+_TEX_SECTION_COMMANDS: list[tuple[str, int]] = [
+    ("\\part", 0),
+    ("\\chapter", 1),
+    ("\\section", 2),
+    ("\\subsection", 3),
+    ("\\subsubsection", 4),
+    ("\\paragraph", 5),
+    ("\\subparagraph", 6),
+]
+
+
+def _parse_md_sections(lines: list[str]) -> list[tuple[str, list[str]]]:
+    """Split markdown content into sections based on headings.
+
+    Each section starts at a heading line and continues until the next
+    heading of equal or higher level, or end of file.
+
+    Args:
+        lines: List of text lines.
+
+    Returns:
+        List of ``(heading, body_lines)`` tuples. Lines before the first
+        heading are returned with an empty heading string.
+    """
+    sections: list[tuple[str, list[str]]] = []
+    current_heading = ""
+    current_body: list[str] = []
+    current_level = 7  # sentinel: lower than any real heading
+
+    for line in lines:
+        m = _MD_HEADING_RE.match(line)
+        if m:
+            level = len(m.group(1))
+            # If this heading is same or higher level, start a new section
+            if level <= current_level:
+                if current_body or current_heading:
+                    sections.append((current_heading, current_body))
+                current_heading = line.rstrip()
+                current_body = []
+                current_level = level
+            else:
+                # Sub-heading: keep accumulating in same section
+                current_body.append(line)
+        else:
+            current_body.append(line)
+
+    # Don't forget the last section
+    if current_body or current_heading:
+        sections.append((current_heading, current_body))
+
+    return sections
+
+
+def _parse_tex_sections(lines: list[str]) -> list[tuple[str, list[str]]]:
+    """Split LaTeX content into sections based on section commands.
+
+    Each section starts at a \\section/\\subsection/etc. command and
+    continues until the next command of equal or higher level, or end of file.
+
+    Args:
+        lines: List of text lines.
+
+    Returns:
+        List of ``(heading, body_lines)`` tuples. Lines before the first
+        section command are returned with an empty heading string.
+    """
+    sections: list[tuple[str, list[str]]] = []
+    current_heading = ""
+    current_body: list[str] = []
+    current_level = 99  # sentinel: higher than any real section level
+
+    for line in lines:
+        stripped = line.strip()
+        matched_level = None
+
+        # Check if this line starts with a section command
+        # Handles both \section{Title} and \section[Short]{Title}
+        for cmd, level in _TEX_SECTION_COMMANDS:
+            if re.match(re.escape(cmd) + r"(\[.*?\])?\s*\{", stripped):
+                matched_level = level
+                break
+
+        if matched_level is not None and matched_level <= current_level:
+            # New section at same or higher level
+            if current_body or current_heading:
+                sections.append((current_heading, current_body))
+            current_heading = line.rstrip()
+            current_body = []
+            current_level = matched_level
+        else:
+            current_body.append(line)
+
+    # Don't forget the last section
+    if current_body or current_heading:
+        sections.append((current_heading, current_body))
+
+    return sections
+
+
+def _search_structured_file(
+    file_path: Path,
+    pattern_lower: str,
+    max_results: int,
+) -> list[str]:
+    """Search a structured file (md/tex) and return matching sections.
+
+    For each line matching the pattern, the entire containing section
+    (heading + body) is returned. Duplicate sections are deduplicated.
+
+    Args:
+        file_path: Path to the file.
+        pattern_lower: Lowercase search pattern.
+        max_results: Maximum number of matching sections to return.
+
+    Returns:
+        List of formatted result blocks.
+    """
+    try:
+        lines = file_path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return []
+
+    # Parse into sections based on file type
+    suffix = file_path.suffix.lower()
+    if suffix == ".md":
+        sections = _parse_md_sections(lines)
+    elif suffix == ".tex":
+        sections = _parse_tex_sections(lines)
+    else:
+        return []
+
+    results: list[str] = []
+    seen_sections: set[int] = set()  # track section indices to deduplicate
+
+    for idx, (heading, body) in enumerate(sections):
+        if len(results) >= max_results:
+            break
+
+        # Check if any line in this section matches
+        all_lines = [heading] + body if heading else body
+        for line in all_lines:
+            if pattern_lower in line.lower():
+                if idx not in seen_sections:
+                    seen_sections.add(idx)
+                    # Format the section
+                    section_text = "\n".join(all_lines).strip()
+                    block = (
+                        f"File: {file_path.name}, Section: {heading or '(beginning)'}\n"
+                        f"{section_text}\n"
+                        f"---"
+                    )
+                    results.append(block)
+                break  # one match per section is enough
+
+    return results
+
+
+def _search_text_file(
+    file_path: Path,
+    pattern_lower: str,
+    max_results: int,
+    context_lines: int,
+) -> list[str]:
+    """Search a plain text file and return matching lines with context.
+
+    Args:
+        file_path: Path to the file.
+        pattern_lower: Lowercase search pattern.
+        max_results: Maximum number of matches to return.
+        context_lines: Number of surrounding context lines.
+
+    Returns:
+        List of formatted result blocks.
+    """
+    try:
+        lines = file_path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return []
+
+    results: list[str] = []
+    for i, line in enumerate(lines):
+        if len(results) >= max_results:
+            break
+
+        if pattern_lower in line.lower():
+            start = max(0, i - context_lines)
+            end = min(len(lines), i + context_lines + 1)
+
+            context_before = lines[start:i]
+            context_after = lines[i + 1 : end]
+
+            before_str = "\n".join(context_before)
+            after_str = "\n".join(context_after)
+            block = (
+                f"File: {file_path.name}, Line {i + 1}:\n"
+                f"{before_str}\n"
+                f">>> {line}\n"
+                f"{after_str}\n"
+                f"---"
+            )
+            results.append(block)
+
+    return results
+
+
 def grep_knowledge(
     pattern: str,
     max_results: int = 20,
     context_lines: int = 2,
     knowledge_dir: str = "knowledge",
 ) -> str:
-    """Search text files in the knowledge base using grep.
+    """Search files in the knowledge base.
+
+    Supports three strategies based on file type:
+    - **.md files**: Return the entire section (heading → next heading) containing matches.
+    - **.tex files**: Return the entire section (\\section → next \\section) containing matches.
+    - **.txt files**: Return matching lines with surrounding context lines.
 
     Args:
         pattern: The text pattern to search for (case-insensitive).
         max_results: Maximum number of results to return (default: 20).
-        context_lines: Number of surrounding context lines (default: 2).
+        context_lines: Number of surrounding context lines for .txt files (default: 2).
         knowledge_dir: Path to the knowledge directory (default: "knowledge").
 
     Returns:
-        A formatted string with matching lines and context, or an error message.
+        A formatted string with matching content, or an error message.
     """
     knowledge_path = Path(knowledge_dir)
 
     if not knowledge_path.is_dir():
         return "Knowledge directory not found."
 
-    txt_files: list[Path] = list(knowledge_path.glob("*.txt"))
-    txt_files.extend(knowledge_path.glob("*/*.txt"))
+    # Collect all supported files
+    all_files: list[Path] = []
+    for ext in _ALL_EXTENSIONS:
+        all_files.extend(knowledge_path.glob(f"*{ext}"))
+        all_files.extend(knowledge_path.glob(f"*/*{ext}"))
 
-    if not txt_files:
+    if not all_files:
         return "No matches found."
 
     pattern_lower = pattern.lower()
     results: list[str] = []
-    total_matches = 0
 
-    for txt_file in sorted(txt_files):
-        if total_matches >= max_results:
+    # Process structured files first (md, tex), then text files
+    structured_files = sorted(f for f in all_files if f.suffix.lower() in _STRUCTURED_EXTENSIONS)
+    text_files = sorted(f for f in all_files if f.suffix.lower() in _TEXT_EXTENSIONS)
+
+    for file_path in structured_files:
+        if len(results) >= max_results:
             break
+        file_results = _search_structured_file(file_path, pattern_lower, max_results - len(results))
+        results.extend(file_results)
 
-        try:
-            lines = txt_file.read_text(encoding="utf-8").splitlines()
-        except (OSError, UnicodeDecodeError):
-            continue
-
-        file_matches: list[tuple[int, str]] = []
-        for i, line in enumerate(lines):
-            if pattern_lower in line.lower():
-                file_matches.append((i, line))
-                total_matches += 1
-                if total_matches >= max_results:
-                    break
-
-        for line_num, matching_line in file_matches:
-            start = max(0, line_num - context_lines)
-            end = min(len(lines), line_num + context_lines + 1)
-
-            context_before = lines[start:line_num]
-            context_after = lines[line_num + 1 : end]
-
-            before_str = "\n".join(context_before)
-            after_str = "\n".join(context_after)
-            block = (
-                f"File: {txt_file.name}, Line {line_num + 1}:\n"
-                f"{before_str}\n"
-                f">>> {matching_line}\n"
-                f"{after_str}\n"
-                f"---"
-            )
-            results.append(block)
+    for file_path in text_files:
+        if len(results) >= max_results:
+            break
+        file_results = _search_text_file(
+            file_path, pattern_lower, max_results - len(results), context_lines
+        )
+        results.extend(file_results)
 
     if not results:
         return "No matches found."
@@ -131,8 +340,9 @@ def get_grep_tool_definition() -> dict:
         "function": {
             "name": "grep_knowledge",
             "description": (
-                "Search text files in the knowledge base using grep. "
-                "Returns matching lines with context."
+                "Search files in the knowledge base. "
+                "For .md and .tex files, returns the entire section containing the match. "
+                "For .txt files, returns matching lines with surrounding context."
             ),
             "parameters": {
                 "type": "object",
@@ -147,7 +357,10 @@ def get_grep_tool_definition() -> dict:
                     },
                     "context_lines": {
                         "type": "integer",
-                        "description": "Number of surrounding context lines (default: 2)",
+                        "description": (
+                            "Number of surrounding context lines for .txt files (default: 2). "
+                            "Ignored for .md and .tex files which return full sections."
+                        ),
                     },
                 },
                 "required": ["pattern"],

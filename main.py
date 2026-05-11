@@ -33,6 +33,7 @@ from ocr import OcrEngine
 from overlay import OutputOverlay, _get_root
 from screenshot import ScreenshotOverlay
 from session import ConversationSession
+from web_search import get_web_search_tool_definition, web_search
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +127,7 @@ class ReadScreenApp:
             tools.append(get_grep_tool_definition())
             tools.append(get_read_file_tool_definition())
             tools.append(get_write_file_tool_definition())
+        tools.append(get_web_search_tool_definition())
         self._llm_client.configure(
             provider_config=self._provider,
             system_prompt=config.system_prompt,
@@ -388,11 +390,12 @@ class ReadScreenApp:
     def _update_agent_status(self) -> None:
         """Build and display the agent status from pending tool calls.
 
-        Grep tools show "搜索<pattern>...". Multiple grep patterns are
-        joined with "|". If the combined string exceeds ~40 characters,
-        shows "搜索<n>个关键词中...". Other tools just show their name.
+        Grep tools show "搜索<pattern>...". Web search shows "搜索网页: <query>...".
+        Multiple grep patterns are joined with "|". If the combined string exceeds
+        ~40 characters, shows "搜索<n>个关键词中...". Other tools just show their name.
         """
         grep_patterns: list[str] = []
+        web_search_queries: list[str] = []
         other_tools: list[str] = []
 
         for t in self._pending_tool_info:
@@ -401,6 +404,10 @@ class ReadScreenApp:
                 pattern = str(t.get("arguments", {}).get("pattern", ""))
                 if pattern:
                     grep_patterns.append(pattern)
+            elif name == "web_search":
+                query = str(t.get("arguments", {}).get("query", ""))
+                if query:
+                    web_search_queries.append(query)
             else:
                 other_tools.append(name)
 
@@ -411,6 +418,9 @@ class ReadScreenApp:
                 parts.append(f"搜索{len(grep_patterns)}个关键词中...")
             else:
                 parts.append(f"搜索{combined}...")
+        if web_search_queries:
+            for q in web_search_queries:
+                parts.append(f"搜索网页: {q}...")
         if other_tools:
             parts.append(", ".join(other_tools))
 
@@ -425,6 +435,7 @@ class ReadScreenApp:
         - ``grep_knowledge``: Search text files in the knowledge base.
         - ``read_file``: Read a file from knowledge/ or memory/ directories.
         - ``write_file``: Write a file to knowledge/ or memory/ directories.
+        - ``web_search``: Search the web using DuckDuckGo.
 
         Tool results are submitted to the session but NOT immediately
         continued.  When multiple tool calls arrive in a single LLM response,
@@ -451,6 +462,10 @@ class ReadScreenApp:
                 knowledge_dir=knowledge_dir,
             )
 
+            logger.info(
+                "[TOOL] grep_knowledge result — pattern=%r, result_len=%d, preview=%r",
+                pattern, len(result), result[:200],
+            )
             self._llm_client.submit_tool_result(tc_id, result)
             self._tool_calls_pending += 1
             self._pending_tool_info.append(tool_call)
@@ -460,6 +475,10 @@ class ReadScreenApp:
             file_path = str(args.get("file_path", ""))
             result = read_file(file_path=file_path, allowed_dirs=allowed_dirs)
 
+            logger.info(
+                "[TOOL] read_file result — path=%r, result_len=%d, preview=%r",
+                file_path, len(result), result[:200],
+            )
             self._llm_client.submit_tool_result(tc_id, result)
             self._tool_calls_pending += 1
             self._pending_tool_info.append(tool_call)
@@ -470,6 +489,24 @@ class ReadScreenApp:
             content = str(args.get("content", ""))
             result = write_file(file_path=file_path, content=content, allowed_dirs=allowed_dirs)
 
+            logger.info(
+                "[TOOL] write_file result — path=%r, content_len=%d, result=%r",
+                file_path, len(content), result,
+            )
+            self._llm_client.submit_tool_result(tc_id, result)
+            self._tool_calls_pending += 1
+            self._pending_tool_info.append(tool_call)
+            self._update_agent_status()
+
+        elif name == "web_search":
+            query = str(args.get("query", ""))
+            max_results = int(args.get("max_results", 8))
+            result = web_search(query=query, max_results=max_results)
+
+            logger.info(
+                "[TOOL] web_search result — query=%r, result_len=%d, preview=%r",
+                query, len(result), result[:200],
+            )
             self._llm_client.submit_tool_result(tc_id, result)
             self._tool_calls_pending += 1
             self._pending_tool_info.append(tool_call)
@@ -477,9 +514,11 @@ class ReadScreenApp:
 
         else:
             logger.warning("Unknown tool call: %s", name)
+            error_result = f"Tool '{name}' is not available."
+            logger.info("[TOOL] unknown tool result — name=%r, result=%r", name, error_result)
             self._llm_client.submit_tool_result(
                 tc_id,
-                f"Tool '{name}' is not available.",
+                error_result,
             )
             self._tool_calls_pending += 1
             self._pending_tool_info.append(tool_call)

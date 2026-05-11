@@ -22,7 +22,9 @@ models:
 
 system_prompt:
   You are a helpful assistant. Answer based on the provided content. If the content is insufficient, say you don't know.
-  Always be concise. Use Chinese to answer.
+  Always be concise. You can grep knowledge base or use web search when necessary or there are some facts need to be verified.
+  When using web search, try both chinese and english keywords, and combine the results to give a more accurate answer. Always cite the source of the information you provide.
+  Use Chinese to answer.
 
 # default_model: "qwen3.6-plus"
 # default_model: "qwen3.6-flash"

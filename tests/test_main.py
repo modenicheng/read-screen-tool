@@ -177,7 +177,7 @@ class TestInitialization:
         assert call_kwargs["model"] == "test-model"
         assert call_kwargs["system_prompt"] == "You are a test assistant."
         assert call_kwargs["session"] is orchestrator._session
-        assert len(call_kwargs["tools"]) == 3
+        assert len(call_kwargs["tools"]) == 4  # 3 knowledge + web_search (always)
 
     def test_llm_client_configured_without_tools(self, app_config, mock_lib_imports):
         """When knowledge is disabled, no tools are configured."""
@@ -187,7 +187,9 @@ class TestInitialization:
         app = ReadScreenApp(app_config)
         try:
             call_kwargs = app._llm_client.configure.call_args[1]
-            assert call_kwargs["tools"] == []
+            # web_search is always available even when knowledge is disabled
+            assert len(call_kwargs["tools"]) == 1
+            assert call_kwargs["tools"][0]["function"]["name"] == "web_search"
         finally:
             app.stop()
 

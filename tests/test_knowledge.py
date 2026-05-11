@@ -52,6 +52,60 @@ def temp_multi_file_dir(tmp_path: Path) -> Generator[Path]:
     yield d
 
 
+@pytest.fixture
+def temp_md_dir(tmp_path: Path) -> Generator[Path]:
+    """Create a temporary knowledge directory with a markdown file."""
+    d = tmp_path / "md_knowledge"
+    d.mkdir()
+    file = d / "notes.md"
+    file.write_text(
+        "# Introduction\n"
+        "This is the intro section.\n"
+        "It contains general information.\n"
+        "\n"
+        "## Getting Started\n"
+        "First, install the dependencies.\n"
+        "Then run the application.\n"
+        "\n"
+        "## Advanced Usage\n"
+        "For advanced users, you can customize settings.\n"
+        "Edit the config.yaml file.\n"
+        "\n"
+        "# Troubleshooting\n"
+        "If you encounter errors, check the logs.\n"
+        "Common issues include missing dependencies.\n",
+        encoding="utf-8",
+    )
+    yield d
+
+
+@pytest.fixture
+def temp_tex_dir(tmp_path: Path) -> Generator[Path]:
+    """Create a temporary knowledge directory with a LaTeX file."""
+    d = tmp_path / "tex_knowledge"
+    d.mkdir()
+    file = d / "paper.tex"
+    file.write_text(
+        "\\section{Introduction}\n"
+        "This paper discusses important topics.\n"
+        "We present novel findings.\n"
+        "\n"
+        "\\subsection{Background}\n"
+        "Previous work has shown various results.\n"
+        "Our approach differs significantly.\n"
+        "\n"
+        "\\section{Methodology}\n"
+        "We used a mixed-methods approach.\n"
+        "Data was collected over six months.\n"
+        "\n"
+        "\\section{Results}\n"
+        "The results support our hypothesis.\n"
+        "Statistical analysis confirms significance.\n",
+        encoding="utf-8",
+    )
+    yield d
+
+
 class TestGrepKnowledge:
     """Tests for grep_knowledge()."""
 
@@ -108,6 +162,118 @@ class TestGrepKnowledge:
         assert "No matches found." not in result
         assert result.count(">>>") >= 1
         assert "File: animals.txt" in result
+
+
+class TestGrepMarkdownSections:
+    """Tests for markdown section-based search."""
+
+    def test_md_returns_entire_section(self, temp_md_dir: Path) -> None:
+        """Search in md file returns the entire section containing the match."""
+        result = grep_knowledge("dependencies", knowledge_dir=str(temp_md_dir))
+        assert "No matches found." not in result
+        assert "File: notes.md" in result
+        # Should return the "Getting Started" section
+        assert "Getting Started" in result
+        assert "install the dependencies" in result
+        assert "run the application" in result
+
+    def test_md_no_duplicate_sections(self, temp_md_dir: Path) -> None:
+        """Multiple matches in same section return only one section."""
+        result = grep_knowledge("section", knowledge_dir=str(temp_md_dir))
+        # "section" appears in multiple places, but each section should appear once
+        lines = result.split("\n")
+        section_headers = [line for line in lines if line.startswith("Section:")]
+        # Count unique section headers
+        unique_headers = set(section_headers)
+        assert len(section_headers) == len(unique_headers)
+
+    def test_md_respects_max_results(self, temp_md_dir: Path) -> None:
+        """max_results limits number of sections returned."""
+        result = grep_knowledge("the", knowledge_dir=str(temp_md_dir), max_results=2)
+        # Count section markers
+        assert result.count("Section:") <= 2
+
+    def test_md_case_insensitive(self, temp_md_dir: Path) -> None:
+        """Search is case insensitive."""
+        result_lower = grep_knowledge("introduction", knowledge_dir=str(temp_md_dir))
+        result_upper = grep_knowledge("INTRODUCTION", knowledge_dir=str(temp_md_dir))
+        assert result_lower == result_upper
+
+    def test_md_subsection_match(self, temp_md_dir: Path) -> None:
+        """Match in a subsection returns the subsection, not the parent section."""
+        result = grep_knowledge("customize", knowledge_dir=str(temp_md_dir))
+        assert "Advanced Usage" in result
+        assert "customize settings" in result
+
+
+class TestGrepTexSections:
+    """Tests for LaTeX section-based search."""
+
+    def test_tex_returns_entire_section(self, temp_tex_dir: Path) -> None:
+        """Search in tex file returns the entire section containing the match."""
+        result = grep_knowledge("mixed-methods", knowledge_dir=str(temp_tex_dir))
+        assert "No matches found." not in result
+        assert "File: paper.tex" in result
+        assert "Methodology" in result
+        assert "mixed-methods" in result
+        assert "six months" in result
+
+    def test_tex_subsection_returns_subsection(self, temp_tex_dir: Path) -> None:
+        """Match in subsection returns the subsection, not parent section."""
+        result = grep_knowledge("differs", knowledge_dir=str(temp_tex_dir))
+        assert "Background" in result
+        assert "differs significantly" in result
+
+    def test_tex_respects_max_results(self, temp_tex_dir: Path) -> None:
+        """max_results limits number of sections returned."""
+        result = grep_knowledge("the", knowledge_dir=str(temp_tex_dir), max_results=1)
+        assert result.count("Section:") <= 1
+
+    def test_tex_case_insensitive(self, temp_tex_dir: Path) -> None:
+        """Search is case insensitive."""
+        result_lower = grep_knowledge("methodology", knowledge_dir=str(temp_tex_dir))
+        result_upper = grep_knowledge("METHODOLOGY", knowledge_dir=str(temp_tex_dir))
+        assert result_lower == result_upper
+
+    def test_tex_no_match(self, temp_tex_dir: Path) -> None:
+        """Search for nonexistent string returns no matches."""
+        result = grep_knowledge("zzzznonsensezzzz", knowledge_dir=str(temp_tex_dir))
+        assert result == "No matches found."
+
+    def test_tex_optional_argument(self, tmp_path: Path) -> None:
+        """Section with optional argument [short]{long} is detected."""
+        d = tmp_path / "tex_opt"
+        d.mkdir()
+        file = d / "opt.tex"
+        file.write_text(
+            "\\section[Short Title]{Long Title Here}\n"
+            "Content under the section.\n"
+            "\\subsection{Sub}\n"
+            "Sub content.\n",
+            encoding="utf-8",
+        )
+        result = grep_knowledge("Content under", knowledge_dir=str(d))
+        assert "No matches found." not in result
+        assert "Long Title Here" in result
+        assert "Content under the section." in result
+
+    def test_tex_pre_heading_content(self, tmp_path: Path) -> None:
+        """Content before first section command is searchable."""
+        d = tmp_path / "tex_pre"
+        d.mkdir()
+        file = d / "pre.tex"
+        file.write_text(
+            "% Preamble\n"
+            "\\documentclass{article}\n"
+            "Some preamble text with keyword.\n"
+            "\\begin{document}\n"
+            "\\section{First}\n"
+            "Section content.\n",
+            encoding="utf-8",
+        )
+        result = grep_knowledge("preamble text", knowledge_dir=str(d))
+        assert "No matches found." not in result
+        assert "preamble text with keyword" in result
 
 
 class TestGetGrepToolDefinition:
