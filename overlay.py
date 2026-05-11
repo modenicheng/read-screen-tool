@@ -1,6 +1,5 @@
 """Transparent frameless always-on-top overlay, reimplemented with tkinter."""
 
-import html.parser
 import logging
 import tkinter as tk
 
@@ -22,56 +21,6 @@ def _get_root() -> tk.Tk:
         _root = tk.Tk()
         _root.withdraw()  # Never show the root window
     return _root
-
-
-# ---------------------------------------------------------------------------
-# Markdown HTML → tk.Text tag parser
-# ---------------------------------------------------------------------------
-
-
-class _MarkdownHTMLParser(html.parser.HTMLParser):
-    """Parse markdown HTML into tagged inserts for tk.Text."""
-
-    def __init__(self, text_widget: tk.Text):
-        super().__init__()
-        self._text = text_widget
-        self._tag_stack: list[str] = []
-        self._index = "end-1c"
-
-    def handle_starttag(self, tag: str, attrs):
-        if tag in ("h1", "h2", "h3"):
-            self._text.insert("end", "\n")
-        elif tag == "strong":
-            self._tag_stack.append("bold")
-        elif tag == "em":
-            self._tag_stack.append("italic")
-        elif tag == "code":
-            self._tag_stack.append("code")
-        elif tag == "pre":
-            self._tag_stack.append("code_block")
-        elif tag == "li":
-            self._text.insert("end", "\n  • ")
-
-    def handle_endtag(self, tag: str):
-        if tag in ("h1", "h2", "h3"):
-            self._text.insert("end", "\n")
-        elif (
-            tag in ("strong", "em", "code", "pre")
-            and self._tag_stack
-            and self._tag_stack[-1] in ("bold", "italic", "code", "code_block")
-        ):
-            self._tag_stack.pop()
-
-    def handle_data(self, data: str):
-        tag = self._tag_stack[-1] if self._tag_stack else None
-        if tag in ("code_block", "code"):
-            self._text.insert("end", data, ("mono",))
-        elif tag == "bold":
-            self._text.insert("end", data, ("bold",))
-        elif tag == "italic":
-            self._text.insert("end", data, ("italic",))
-        else:
-            self._text.insert("end", data)
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +49,6 @@ class OutputOverlay:
         self._window.wm_attributes("-topmost", True)
 
         # Overall window transparency (0.0 = invisible, 1.0 = opaque)
-        # Using alpha instead of color-key to avoid click-through on Windows
         self._window.configure(bg="#1e1e1e")
         self._window.wm_attributes("-alpha", 0.12)
 
@@ -111,29 +59,22 @@ class OutputOverlay:
         self._shadow_enabled = shadow
         self._shadow_effect = None  # tkinter has no QGraphicsDropShadow equivalent
 
-        # Text widget — fills entire window
+        # Plain text widget — fills entire window
         self._text_widget = tk.Text(
             self._window,
             bg="#1e1e1e",
             fg=font_color,
             font=(font_family, font_size),
+            relief=tk.FLAT,
             wrap=tk.WORD,
-            relief="flat",
-            borderwidth=0,
             highlightthickness=0,
+            insertbackground=font_color,
             padx=8,
             pady=8,
-            cursor="arrow",
-            state=tk.DISABLED,
         )
         self._text_widget.pack(fill=tk.BOTH, expand=True)
 
-        # Text tags for markdown styling
-        self._text_widget.tag_configure("bold", font=(font_family, font_size, "bold"))
-        self._text_widget.tag_configure("italic", font=(font_family, font_size, "italic"))
-        self._text_widget.tag_configure("mono", font=("Consolas", font_size))
-
-        # Buffer for streaming text
+        # Buffer for streaming text (backward compat)
         self._text_blocks: list[str] = [""]
 
         # Default geometry
@@ -191,79 +132,31 @@ class OutputOverlay:
     # -----------------------------------------------------------------------
 
     def append_text(self, text: str) -> None:
-        """Append text to the current (last) text block.
+        """Append text to the output widget.
 
-        Streaming-friendly: each call accumulates into the same block
-        until ``add_separator()`` starts a new one.
+        Streaming-friendly: each call inserts at the end and auto-scrolls.
         """
-        is_md = self._is_markdown(text)
+        self._text_widget.insert(tk.END, text)
+        self._text_widget.see(tk.END)
 
-        # Enable widget for insert
-        self._text_widget.configure(state=tk.NORMAL)
-
-        if is_md:
-            self._render_markdown(text)
-        else:
-            self._text_widget.insert("end", text)
-            self._text_widget.see("end")
-
-        self._text_widget.configure(state=tk.DISABLED)
-
-        # Buffer management
+        # Buffer management (backward compat — tests depend on _text_blocks)
         if not self._text_blocks:
             self._text_blocks = [""]
         self._text_blocks[-1] += text
+
         self._root.update_idletasks()
         self.text_added.emit(text)
 
     def add_separator(self) -> None:
         """Add a horizontal separator line between text blocks."""
-        self._text_widget.configure(state=tk.NORMAL)
-        self._text_widget.insert("end", "\n")
-        self._text_widget.see("end")
-        self._text_widget.configure(state=tk.DISABLED)
+        self._text_widget.insert(tk.END, "\n" + "─" * 40 + "\n\n")
+        self._text_widget.see(tk.END)
         self._text_blocks.append("")
 
     def clear(self) -> None:
         """Clear all text blocks and reset the widget."""
-        self._text_widget.configure(state=tk.NORMAL)
-        self._text_widget.delete("1.0", "end")
-        self._text_widget.configure(state=tk.DISABLED)
+        self._text_widget.delete("1.0", tk.END)
         self._text_blocks.clear()
-
-    # -----------------------------------------------------------------------
-    # Markdown
-    # -----------------------------------------------------------------------
-
-    @staticmethod
-    def _is_markdown(text: str) -> bool:
-        """Detect whether *text* contains markdown syntax."""
-        return (
-            text.startswith("#")
-            or text.startswith("*")
-            or text.startswith("`")
-            or text.startswith(">")
-            or text.startswith("- ")
-            or "**" in text
-            or "*" in text
-            or "`" in text
-        )
-
-    def _render_markdown(self, text: str) -> None:
-        """Convert markdown to HTML, then parse into tagged tk.Text inserts."""
-        try:
-            import markdown
-
-            html_str = markdown.markdown(text, extensions=["fenced_code", "tables"])
-        except ImportError:
-            # Fallback: plain text if markdown library unavailable
-            self._text_widget.insert("end", text)
-            self._text_widget.see("end")
-            return
-
-        parser = _MarkdownHTMLParser(self._text_widget)
-        parser.feed(html_str)
-        self._text_widget.see("end")
 
     # -----------------------------------------------------------------------
     # Window geometry

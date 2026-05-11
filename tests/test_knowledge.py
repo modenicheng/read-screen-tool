@@ -5,7 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from knowledge import get_grep_tool_definition, grep_knowledge
+from knowledge import (
+    get_grep_tool_definition,
+    get_read_file_tool_definition,
+    get_write_file_tool_definition,
+    grep_knowledge,
+    read_file,
+    write_file,
+)
 
 
 @pytest.fixture
@@ -133,3 +140,145 @@ class TestGetGrepToolDefinition:
 
         assert "pattern" in params["required"]
         assert len(params["required"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Tests for read_file
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def temp_dirs(tmp_path: Path) -> tuple[Path, Path]:
+    """Create temporary knowledge and memory directories with test files."""
+    knowledge = tmp_path / "knowledge"
+    memory = tmp_path / "memory"
+    knowledge.mkdir()
+    memory.mkdir()
+
+    (knowledge / "notes.txt").write_text("knowledge content", encoding="utf-8")
+    (memory / "todo.txt").write_text("memory content", encoding="utf-8")
+    (memory / "subdir").mkdir()
+    (memory / "subdir" / "nested.txt").write_text("nested content", encoding="utf-8")
+
+    return knowledge, memory
+
+
+class TestReadFile:
+    """Tests for read_file()."""
+
+    def test_read_from_knowledge(self, temp_dirs: tuple[Path, Path]) -> None:
+        """Read a file from the knowledge directory."""
+        knowledge, memory = temp_dirs
+        result = read_file("notes.txt", allowed_dirs=[str(knowledge), str(memory)])
+        assert result == "knowledge content"
+
+    def test_read_from_memory(self, temp_dirs: tuple[Path, Path]) -> None:
+        """Read a file from the memory directory."""
+        knowledge, memory = temp_dirs
+        result = read_file("todo.txt", allowed_dirs=[str(knowledge), str(memory)])
+        assert result == "memory content"
+
+    def test_read_nested_file(self, temp_dirs: tuple[Path, Path]) -> None:
+        """Read a file in a subdirectory."""
+        knowledge, memory = temp_dirs
+        result = read_file("subdir/nested.txt", allowed_dirs=[str(knowledge), str(memory)])
+        assert result == "nested content"
+
+    def test_read_nonexistent_file(self, temp_dirs: tuple[Path, Path]) -> None:
+        """Reading a nonexistent file returns an error."""
+        knowledge, memory = temp_dirs
+        result = read_file("no_such_file.txt", allowed_dirs=[str(knowledge), str(memory)])
+        assert "Error" in result
+        assert "not found" in result.lower()
+
+    def test_read_outside_allowed_dirs(self, temp_dirs: tuple[Path, Path]) -> None:
+        """Path traversal attempt is rejected."""
+        knowledge, memory = temp_dirs
+        result = read_file("../../etc/passwd", allowed_dirs=[str(knowledge), str(memory)])
+        assert "Error" in result
+        assert "not within allowed" in result
+
+    def test_read_absolute_path_rejected(self, temp_dirs: tuple[Path, Path]) -> None:
+        """Absolute paths are rejected."""
+        knowledge, memory = temp_dirs
+        result = read_file("/etc/passwd", allowed_dirs=[str(knowledge), str(memory)])
+        assert "Error" in result
+
+    def test_read_default_dirs(self, tmp_path: Path) -> None:
+        """Default allowed_dirs is ['knowledge', 'memory']."""
+        # This will fail because 'knowledge' and 'memory' don't exist at cwd
+        result = read_file("any_file.txt")
+        assert "Error" in result
+
+
+class TestWriteFile:
+    """Tests for write_file()."""
+
+    def test_write_to_memory(self, temp_dirs: tuple[Path, Path]) -> None:
+        """Write a file to the memory directory."""
+        knowledge, memory = temp_dirs
+        result = write_file("output.txt", "hello world", allowed_dirs=[str(memory)])
+        assert "Successfully wrote" in result
+        assert (memory / "output.txt").read_text(encoding="utf-8") == "hello world"
+
+    def test_write_to_knowledge(self, temp_dirs: tuple[Path, Path]) -> None:
+        """Write a file to the knowledge directory."""
+        knowledge, memory = temp_dirs
+        result = write_file("new_note.txt", "note content", allowed_dirs=[str(knowledge)])
+        assert "Successfully wrote" in result
+        assert (knowledge / "new_note.txt").read_text(encoding="utf-8") == "note content"
+
+    def test_write_creates_parent_dirs(self, temp_dirs: tuple[Path, Path]) -> None:
+        """Write creates parent directories if they don't exist."""
+        knowledge, memory = temp_dirs
+        result = write_file("deep/nested/file.txt", "deep content", allowed_dirs=[str(memory)])
+        assert "Successfully wrote" in result
+        written = (memory / "deep" / "nested" / "file.txt").read_text(encoding="utf-8")
+        assert written == "deep content"
+
+    def test_write_outside_allowed_dirs(self, temp_dirs: tuple[Path, Path]) -> None:
+        """Path traversal attempt is rejected."""
+        knowledge, memory = temp_dirs
+        result = write_file("../../etc/evil.txt", "bad", allowed_dirs=[str(knowledge), str(memory)])
+        assert "Error" in result
+        assert "not within allowed" in result
+
+    def test_write_absolute_path_rejected(self, temp_dirs: tuple[Path, Path]) -> None:
+        """Absolute paths are rejected."""
+        knowledge, memory = temp_dirs
+        result = write_file("/tmp/evil.txt", "bad", allowed_dirs=[str(knowledge), str(memory)])
+        assert "Error" in result
+
+    def test_write_overwrites_existing(self, temp_dirs: tuple[Path, Path]) -> None:
+        """Writing to an existing file overwrites it."""
+        knowledge, memory = temp_dirs
+        write_file("todo.txt", "new content", allowed_dirs=[str(memory)])
+        assert (memory / "todo.txt").read_text(encoding="utf-8") == "new content"
+
+
+class TestGetReadFileToolDefinition:
+    """Tests for get_read_file_tool_definition()."""
+
+    def test_structure(self) -> None:
+        """Verify the tool definition has correct structure."""
+        definition = get_read_file_tool_definition()
+        assert definition["type"] == "function"
+        assert definition["function"]["name"] == "read_file"
+        assert "file_path" in definition["function"]["parameters"]["properties"]
+        assert "file_path" in definition["function"]["parameters"]["required"]
+
+
+class TestGetWriteFileToolDefinition:
+    """Tests for get_write_file_tool_definition()."""
+
+    def test_structure(self) -> None:
+        """Verify the tool definition has correct structure."""
+        definition = get_write_file_tool_definition()
+        assert definition["type"] == "function"
+        assert definition["function"]["name"] == "write_file"
+        props = definition["function"]["parameters"]["properties"]
+        assert "file_path" in props
+        assert "content" in props
+        required = definition["function"]["parameters"]["required"]
+        assert "file_path" in required
+        assert "content" in required

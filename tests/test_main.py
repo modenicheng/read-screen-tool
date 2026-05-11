@@ -18,13 +18,13 @@ def create_minimal_config() -> AppConfig:
     """Build a minimal valid AppConfig for testing."""
     from config import (
         FontConfig,
+        HotkeyConfig,
         KnowledgeConfig,
         ModelConfig,
         OcrConfig,
         OutputWindowConfig,
         PositionConfig,
         ProviderConfig,
-        ScreenshotConfig,
         SizeConfig,
         SystrayConfig,
     )
@@ -39,7 +39,11 @@ def create_minimal_config() -> AppConfig:
         system_prompt="You are a test assistant.",
         default_model="test-model",
         ocr=OcrConfig(language="ch", device="cpu"),
-        screenshot=ScreenshotConfig(hotkey_modifiers=["ctrl", "shift"], hotkey_button="left"),
+        hotkeys=HotkeyConfig(
+            screenshot="ctrl+shift+left",
+            toggle_overlay="ctrl+alt+a",
+            move_overlay="ctrl+shift+right",
+        ),
         output_window=OutputWindowConfig(
             position=PositionConfig(x=0, y=0),
             size=SizeConfig(width=400, height=300),

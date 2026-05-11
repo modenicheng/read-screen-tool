@@ -137,37 +137,11 @@ class TestShadowEffect:
         widget.close()
 
     def test_text_widget_created(self) -> None:
-        """Verify a text widget is created for output."""
+        """Verify a tk.Text widget is created for output."""
         import tkinter as tk
         widget = OutputOverlay()
         assert isinstance(widget._text_widget, tk.Text)
         widget.close()
-
-
-class TestMarkdownRendering:
-    """Tests for Markdown rendering support."""
-
-    def test_is_markdown_detects_heading(self, overlay: OutputOverlay) -> None:
-        """Text starting with # is identified as markdown."""
-        assert overlay._is_markdown("# Heading") is True
-
-    def test_is_markdown_detects_asterisk(self, overlay: OutputOverlay) -> None:
-        """Text containing * is identified as markdown."""
-        assert overlay._is_markdown("*bold*") is True
-
-    def test_is_markdown_detects_backtick(self, overlay: OutputOverlay) -> None:
-        """Text containing ` is identified as markdown."""
-        assert overlay._is_markdown("`code`") is True
-
-    def test_is_markdown_plain_text(self, overlay: OutputOverlay) -> None:
-        """Plain text without markdown syntax is not identified."""
-        assert overlay._is_markdown("Hello world.") is False
-
-    def test_append_markdown_text_renders(self, overlay: OutputOverlay) -> None:
-        """Appending markdown text emits signal without crashing."""
-        spy = SignalSpy(overlay.text_added)
-        overlay.append_text("# Hello")
-        assert spy.count() == 1
 
 
 class TestCleanup:

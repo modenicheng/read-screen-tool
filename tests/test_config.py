@@ -7,14 +7,13 @@ import yaml
 
 from config import (
     FontConfig,
+    HotkeyConfig,
     KnowledgeConfig,
     ModelConfig,
     OcrConfig,
     OutputWindowConfig,
-    OverlayConfig,
     PositionConfig,
     ProviderConfig,
-    ScreenshotConfig,
     SizeConfig,
     SystrayConfig,
     load_config,
@@ -41,9 +40,10 @@ class TestLoadConfig:
         assert cfg.ocr.language == "ch"
         assert cfg.ocr.device == "cpu"
 
-        assert isinstance(cfg.screenshot, ScreenshotConfig)
-        assert cfg.screenshot.hotkey_modifiers == ["ctrl", "shift"]
-        assert cfg.screenshot.hotkey_button == "left"
+        assert isinstance(cfg.hotkeys, HotkeyConfig)
+        assert cfg.hotkeys.screenshot == "ctrl+shift+left"
+        assert cfg.hotkeys.toggle_overlay == "ctrl+alt+a"
+        assert cfg.hotkeys.move_overlay == "ctrl+shift+right"
 
         assert isinstance(cfg.output_window, OutputWindowConfig)
         assert isinstance(cfg.output_window.position, PositionConfig)
@@ -60,9 +60,6 @@ class TestLoadConfig:
 
         assert isinstance(cfg.systray, SystrayConfig)
         assert cfg.systray.show_icon is True
-
-        assert isinstance(cfg.overlay, OverlayConfig)
-        assert cfg.overlay.toggle_hotkey == "ctrl+alt+a"
 
         assert isinstance(cfg.knowledge, KnowledgeConfig)
         assert cfg.knowledge.enabled is True
@@ -93,8 +90,9 @@ class TestLoadConfig:
         assert cfg.ocr.language == "ch"
         assert cfg.ocr.device == "cpu"
 
-        assert cfg.screenshot.hotkey_modifiers == ["ctrl", "shift"]
-        assert cfg.screenshot.hotkey_button == "left"
+        assert cfg.hotkeys.screenshot == "ctrl+shift+left"
+        assert cfg.hotkeys.toggle_overlay == "ctrl+alt+a"
+        assert cfg.hotkeys.move_overlay == "ctrl+shift+right"
 
         assert cfg.output_window.position.x == 100
         assert cfg.output_window.position.y == 100
@@ -105,8 +103,6 @@ class TestLoadConfig:
         assert cfg.output_window.shadow is True
 
         assert cfg.systray.show_icon is True
-
-        assert cfg.overlay.toggle_hotkey == "ctrl+alt+a"
 
         assert cfg.knowledge.enabled is True
         assert cfg.knowledge.directory == "knowledge"
@@ -262,7 +258,11 @@ class TestRoundTrip:
             "system_prompt": "Custom prompt.",
             "default_model": "m1",
             "ocr": {"language": "en", "device": "gpu"},
-            "screenshot": {"hotkey_modifiers": ["alt"], "hotkey_button": "right"},
+            "hotkeys": {
+                "screenshot": "alt+right",
+                "toggle_overlay": "ctrl+shift+z",
+                "move_overlay": "ctrl+alt+right",
+            },
             "output_window": {
                 "position": {"x": 50, "y": 60},
                 "size": {"width": 800, "height": 600},
@@ -270,7 +270,6 @@ class TestRoundTrip:
                 "shadow": False,
             },
             "systray": {"show_icon": False},
-            "overlay": {"toggle_hotkey": "ctrl+shift+z"},
             "knowledge": {"enabled": False, "directory": "custom_kb"},
         }
 
@@ -304,8 +303,9 @@ class TestRoundTrip:
         assert cfg.ocr.language == "en"
         assert cfg.ocr.device == "gpu"
 
-        assert cfg.screenshot.hotkey_modifiers == ["alt"]
-        assert cfg.screenshot.hotkey_button == "right"
+        assert cfg.hotkeys.screenshot == "alt+right"
+        assert cfg.hotkeys.toggle_overlay == "ctrl+shift+z"
+        assert cfg.hotkeys.move_overlay == "ctrl+alt+right"
 
         assert cfg.output_window.position.x == 50
         assert cfg.output_window.position.y == 60
@@ -317,8 +317,6 @@ class TestRoundTrip:
         assert cfg.output_window.shadow is False
 
         assert cfg.systray.show_icon is False
-
-        assert cfg.overlay.toggle_hotkey == "ctrl+shift+z"
 
         assert cfg.knowledge.enabled is False
         assert cfg.knowledge.directory == "custom_kb"

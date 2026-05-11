@@ -39,9 +39,10 @@ def sample_config_dict():
             "language": "ch",
             "device": "cpu",
         },
-        "screenshot": {
-            "hotkey_modifiers": ["ctrl", "shift"],
-            "hotkey_button": "left",
+        "hotkeys": {
+            "screenshot": "ctrl+shift+left",
+            "toggle_overlay": "ctrl+alt+a",
+            "move_overlay": "ctrl+shift+right",
         },
         "output_window": {
             "position": {"x": 100, "y": 100},
@@ -51,9 +52,6 @@ def sample_config_dict():
         },
         "systray": {
             "show_icon": True,
-        },
-        "overlay": {
-            "toggle_hotkey": "ctrl+alt+a",
         },
         "knowledge": {
             "enabled": True,

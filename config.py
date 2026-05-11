@@ -28,9 +28,10 @@ class OcrConfig:
 
 
 @dataclass
-class ScreenshotConfig:
-    hotkey_modifiers: list[str] = field(default_factory=lambda: ["ctrl", "shift"])
-    hotkey_button: str = "left"
+class HotkeyConfig:
+    screenshot: str = "ctrl+shift+left"
+    toggle_overlay: str = "ctrl+alt+a"
+    move_overlay: str = "ctrl+shift+right"
 
 
 @dataclass
@@ -66,14 +67,10 @@ class SystrayConfig:
 
 
 @dataclass
-class OverlayConfig:
-    toggle_hotkey: str = "ctrl+alt+a"
-
-
-@dataclass
 class KnowledgeConfig:
     enabled: bool = True
     directory: str = "knowledge"
+    memory_directory: str = "memory"
 
 
 @dataclass
@@ -83,10 +80,9 @@ class AppConfig:
     system_prompt: str = "You are a helpful assistant."
     default_model: str = ""
     ocr: OcrConfig = field(default_factory=OcrConfig)
-    screenshot: ScreenshotConfig = field(default_factory=ScreenshotConfig)
+    hotkeys: HotkeyConfig = field(default_factory=HotkeyConfig)
     output_window: OutputWindowConfig = field(default_factory=OutputWindowConfig)
     systray: SystrayConfig = field(default_factory=SystrayConfig)
-    overlay: OverlayConfig = field(default_factory=OverlayConfig)
     knowledge: KnowledgeConfig = field(default_factory=KnowledgeConfig)
 
     def get_provider(self, name: str) -> ProviderConfig | None:
@@ -151,8 +147,8 @@ def _build_ocr(data: dict) -> OcrConfig:
     return OcrConfig(**data)
 
 
-def _build_screenshot(data: dict) -> ScreenshotConfig:
-    return ScreenshotConfig(**data)
+def _build_hotkeys(data: dict) -> HotkeyConfig:
+    return HotkeyConfig(**data)
 
 
 def _build_output_window(data: dict) -> OutputWindowConfig:
@@ -164,10 +160,6 @@ def _build_output_window(data: dict) -> OutputWindowConfig:
 
 def _build_systray(data: dict) -> SystrayConfig:
     return SystrayConfig(**data)
-
-
-def _build_overlay(data: dict) -> OverlayConfig:
-    return OverlayConfig(**data)
 
 
 def _build_knowledge(data: dict) -> KnowledgeConfig:
@@ -223,10 +215,9 @@ def load_config(path: str | Path = "config.yaml") -> AppConfig:
     models = _build_models(models_raw)
 
     ocr = _build_ocr(raw.pop("ocr", {}))
-    screenshot = _build_screenshot(raw.pop("screenshot", {}))
+    hotkeys = _build_hotkeys(raw.pop("hotkeys", {}))
     output_window = _build_output_window(raw.pop("output_window", {}))
     systray = _build_systray(raw.pop("systray", {}))
-    overlay = _build_overlay(raw.pop("overlay", {}))
     knowledge = _build_knowledge(raw.pop("knowledge", {}))
 
     app = AppConfig(
@@ -235,10 +226,9 @@ def load_config(path: str | Path = "config.yaml") -> AppConfig:
         system_prompt=raw.pop("system_prompt", "You are a helpful assistant."),
         default_model=raw.pop("default_model", ""),
         ocr=ocr,
-        screenshot=screenshot,
+        hotkeys=hotkeys,
         output_window=output_window,
         systray=systray,
-        overlay=overlay,
         knowledge=knowledge,
     )
 

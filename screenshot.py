@@ -202,15 +202,6 @@ class ScreenshotOverlay:
             outline="#0078FF", width=2, fill="",
         )
 
-        # Size label (top-left inside selection)
-        canvas.create_text(
-            sel_x + 6, sel_y + 2,
-            text=f"{sel_w} x {sel_h}",
-            anchor="nw",
-            fill="white",
-            font=("Microsoft YaHei", 10),
-        )
-
     # -----------------------------------------------------------------------
     # Event handlers
     # -----------------------------------------------------------------------

@@ -19,7 +19,14 @@ from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import QApplication
 
 from config import AppConfig, load_config
-from knowledge import get_grep_tool_definition, grep_knowledge
+from knowledge import (
+    get_grep_tool_definition,
+    get_read_file_tool_definition,
+    get_write_file_tool_definition,
+    grep_knowledge,
+    read_file,
+    write_file,
+)
 from llm import LlmClient
 from ocr import OcrEngine
 from overlay import OutputOverlay
@@ -118,6 +125,8 @@ class ReadScreenApp(QObject):
         tools: list[dict[str, Any]] = []
         if config.knowledge.enabled:
             tools.append(get_grep_tool_definition())
+            tools.append(get_read_file_tool_definition())
+            tools.append(get_write_file_tool_definition())
         self._llm_client.configure(
             provider_config=self._provider,
             system_prompt=config.system_prompt,
@@ -169,7 +178,9 @@ class ReadScreenApp(QObject):
             from hotkey import HotkeyManager  # noqa: PLC0415
 
             self._hotkey = HotkeyManager()
-            self._hotkey.set_toggle_hotkey(config.overlay.toggle_hotkey)
+            self._hotkey.set_toggle_hotkey(config.hotkeys.toggle_overlay)
+            self._hotkey.set_screenshot_hotkey(config.hotkeys.screenshot)
+            self._hotkey.set_move_overlay_hotkey(config.hotkeys.move_overlay)
         except ImportError:
             logger.warning("hotkey module not available — hotkeys disabled.")
 
@@ -368,15 +379,21 @@ class ReadScreenApp(QObject):
     def _on_tool_call_requested(self, tool_call: dict[str, Any]) -> None:
         """Dispatch tool calls from the LLM.
 
-        Only ``grep_knowledge`` is supported.  The tool result is submitted
-        back to the LLM client, which continues the conversation.
-        Increments the response counter since ``continue_after_tool`` will
-        produce another ``response_complete``.
+        Supported tools:
+        - ``grep_knowledge``: Search text files in the knowledge base.
+        - ``read_file``: Read a file from knowledge/ or memory/ directories.
+        - ``write_file``: Write a file to knowledge/ or memory/ directories.
+
+        The tool result is submitted back to the LLM client, which continues
+        the conversation.  Increments the response counter since
+        ``continue_after_tool`` will produce another ``response_complete``.
         """
         name = tool_call.get("name", "")
         tc_id = tool_call.get("id", "")
         args: dict[str, Any] = tool_call.get("arguments", {})
         logger.info("[MAIN] _on_tool_call_requested() — tool=%s, id=%s, args=%s", name, tc_id, args)
+
+        allowed_dirs = [self._config.knowledge.directory, self._config.knowledge.memory_directory]
 
         if name == "grep_knowledge":
             pattern = str(args.get("pattern", ""))
@@ -394,6 +411,24 @@ class ReadScreenApp(QObject):
             self._pending_responses += 1
             self._llm_client.submit_tool_result(tc_id, result)
             self._llm_client.continue_after_tool()
+
+        elif name == "read_file":
+            file_path = str(args.get("file_path", ""))
+            result = read_file(file_path=file_path, allowed_dirs=allowed_dirs)
+
+            self._pending_responses += 1
+            self._llm_client.submit_tool_result(tc_id, result)
+            self._llm_client.continue_after_tool()
+
+        elif name == "write_file":
+            file_path = str(args.get("file_path", ""))
+            content = str(args.get("content", ""))
+            result = write_file(file_path=file_path, content=content, allowed_dirs=allowed_dirs)
+
+            self._pending_responses += 1
+            self._llm_client.submit_tool_result(tc_id, result)
+            self._llm_client.continue_after_tool()
+
         else:
             logger.warning("Unknown tool call: %s", name)
             self._pending_responses += 1

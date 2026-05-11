@@ -23,9 +23,10 @@ ocr:
   language: "ch"
   device: "cpu"
 
-screenshot:
-  hotkey_modifiers: ["ctrl", "shift"]
-  hotkey_button: "left"
+hotkeys:
+  screenshot: "ctrl+shift+left"
+  toggle_overlay: "ctrl+alt+a"
+  move_overlay: "ctrl+shift+right"
 
 output_window:
   position:
@@ -46,3 +47,4 @@ systray:
 knowledge:
   enabled: true
   directory: "knowledge"
+  memory_directory: "memory"

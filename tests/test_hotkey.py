@@ -416,6 +416,40 @@ class TestScreenshotHotkey:
         assert screenshot_spy.count() == 0
         assert move_spy.count() == 1
 
+    # -- Configurable screenshot hotkey --------------------------------------
+
+    def test_custom_screenshot_hotkey_emits(
+        self, manager: HotkeyManager, mock_button
+    ) -> None:
+        """set_screenshot_hotkey('ctrl+alt+left') emits when ctrl+alt held + left click."""
+        manager.set_screenshot_hotkey("ctrl+alt+left")
+        spy = QSignalSpy(manager.screenshot_requested)
+        manager._ctrl_pressed = True
+        manager._alt_pressed = True
+        _click(manager, mock_button("left"))
+        assert spy.count() == 1
+
+    def test_custom_screenshot_hotkey_wrong_button_no_emit(
+        self, manager: HotkeyManager, mock_button
+    ) -> None:
+        """Custom screenshot hotkey does not emit when wrong button is clicked."""
+        manager.set_screenshot_hotkey("ctrl+alt+left")
+        spy = QSignalSpy(manager.screenshot_requested)
+        manager._ctrl_pressed = True
+        manager._alt_pressed = True
+        _click(manager, mock_button("right"))
+        assert spy.count() == 0
+
+    def test_custom_screenshot_hotkey_wrong_modifiers_no_emit(
+        self, manager: HotkeyManager, mock_button
+    ) -> None:
+        """Custom screenshot hotkey does not emit when modifiers are wrong."""
+        manager.set_screenshot_hotkey("ctrl+alt+left")
+        spy = QSignalSpy(manager.screenshot_requested)
+        manager._ctrl_pressed = True
+        _click(manager, mock_button("left"))
+        assert spy.count() == 0
+
 
 # ---------------------------------------------------------------------------
 # Test: toggle_overlay_requested signal (Ctrl+Alt+A)
@@ -807,3 +841,60 @@ class TestConfigurableToggleHotkey:
         type(f1_key).name = "f1"
         _press(manager, f1_key)
         assert spy.count() == 1
+
+
+# ---------------------------------------------------------------------------
+# Test: configurable move-overlay hotkey
+# ---------------------------------------------------------------------------
+
+
+class TestConfigurableMoveOverlayHotkey:
+    """Tests for set_move_overlay_hotkey() and configurable move-overlay triggering."""
+
+    def test_default_move_hotkey_is_ctrl_shift_right(
+        self, manager: HotkeyManager
+    ) -> None:
+        """Default move-overlay hotkey is Ctrl+Shift+Right."""
+        assert manager._move_overlay_button == "right"
+        assert manager._move_overlay_modifiers == ["ctrl", "shift"]
+
+    def test_set_move_overlay_hotkey_updates_config(
+        self, manager: HotkeyManager
+    ) -> None:
+        """set_move_overlay_hotkey() updates the internal configuration."""
+        manager.set_move_overlay_hotkey("ctrl+alt+right")
+        assert manager._move_overlay_button == "right"
+        assert manager._move_overlay_modifiers == ["ctrl", "alt"]
+
+    def test_custom_move_hotkey_emits_signal(
+        self, manager: HotkeyManager, mock_button
+    ) -> None:
+        """Custom move-overlay hotkey (Ctrl+Alt+Right) emits move_overlay_to_cursor."""
+        manager.set_move_overlay_hotkey("ctrl+alt+right")
+        spy = QSignalSpy(manager.move_overlay_to_cursor)
+        manager._ctrl_pressed = True
+        manager._alt_pressed = True
+        _click(manager, mock_button("right"), x=42, y=99)
+        assert spy.count() == 1
+        assert spy.at(0) == [42, 99]
+
+    def test_custom_move_hotkey_wrong_button_no_emit(
+        self, manager: HotkeyManager, mock_button
+    ) -> None:
+        """Custom move-overlay hotkey does not emit with wrong button."""
+        manager.set_move_overlay_hotkey("ctrl+alt+right")
+        spy = QSignalSpy(manager.move_overlay_to_cursor)
+        manager._ctrl_pressed = True
+        manager._alt_pressed = True
+        _click(manager, mock_button("left"))
+        assert spy.count() == 0
+
+    def test_custom_move_hotkey_wrong_modifiers_no_emit(
+        self, manager: HotkeyManager, mock_button
+    ) -> None:
+        """Custom move-overlay hotkey does not emit with wrong modifiers."""
+        manager.set_move_overlay_hotkey("ctrl+alt+right")
+        spy = QSignalSpy(manager.move_overlay_to_cursor)
+        manager._ctrl_pressed = True
+        _click(manager, mock_button("right"))
+        assert spy.count() == 0

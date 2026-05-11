@@ -4,9 +4,10 @@ Provides a ``HotkeyManager`` that listens for global keyboard and mouse events
 in background threads and emits Qt signals on the main thread when hotkey
 combinations are detected.
 
-Hotkeys:
-    - **Ctrl+Shift+LeftClick** → ``screenshot_requested``
-    - **Ctrl+Alt+A** → ``toggle_overlay_requested``
+Hotkeys (all configurable via ``set_*_hotkey()``):
+    - **Ctrl+Shift+LeftClick** → ``screenshot_requested`` (default)
+    - **Ctrl+Alt+A** → ``toggle_overlay_requested`` (default)
+    - **Ctrl+Shift+RightClick** → ``move_overlay_to_cursor`` (default)
 """
 
 from __future__ import annotations
@@ -84,13 +85,19 @@ class HotkeyManager(QObject):
     """
 
     screenshot_requested = Signal()
-    """Emitted when Ctrl+Shift+LeftClick is detected globally."""
+    """Emitted when the configurable screenshot mouse hotkey is detected.
+
+    Default: Ctrl+Shift+LeftClick.
+    """
 
     toggle_overlay_requested = Signal()
     """Emitted when Ctrl+Alt+A is pressed."""
 
     move_overlay_to_cursor = Signal(int, int)
-    """Emitted when Ctrl+Shift+RightClick is detected — (x, y) cursor position."""
+    """Emitted when the configurable move-overlay mouse hotkey is detected.
+
+    Default: Ctrl+Shift+RightClick.  Carries (x, y) cursor position.
+    """
 
     alt_state_changed = Signal(bool)
     """Emitted when the Alt key is pressed (True) or released (False) globally."""
@@ -108,6 +115,14 @@ class HotkeyManager(QObject):
         self._toggle_trigger_key: str = ""
         self._toggle_trigger_vk: int | None = None
         self.set_toggle_hotkey(_DEFAULT_TOGGLE_HOTKEY)
+
+        # -- Configurable screenshot hotkey (mouse-based) -------------------
+        self._screenshot_modifiers: list[str] = ["ctrl", "shift"]
+        self._screenshot_button: str = "left"
+
+        # -- Configurable move-overlay hotkey (mouse-based) ------------------
+        self._move_overlay_modifiers: list[str] = ["ctrl", "shift"]
+        self._move_overlay_button: str = "right"
 
         # -- Listener handles -----------------------------------------------
         self._keyboard_listener: object | None = None
@@ -130,6 +145,38 @@ class HotkeyManager(QObject):
         logger.info(
             "[HOTKEY] toggle hotkey configured: modifiers=%s, trigger=%s, vk=%s",
             self._toggle_modifiers, self._toggle_trigger_key, self._toggle_trigger_vk,
+        )
+
+    def set_screenshot_hotkey(self, config_str: str) -> None:
+        """Configure the screenshot hotkey from a ``+``-separated string.
+
+        The trigger part is treated as a mouse button name
+        (e.g. ``"left"``, ``"right"``, ``"middle"``).
+
+        Example: ``"ctrl+shift+left"``.
+        """
+        modifiers, trigger, _ = parse_hotkey(config_str)
+        self._screenshot_modifiers = modifiers
+        self._screenshot_button = trigger
+        logger.info(
+            "[HOTKEY] screenshot hotkey configured: modifiers=%s, button=%s",
+            self._screenshot_modifiers, self._screenshot_button,
+        )
+
+    def set_move_overlay_hotkey(self, config_str: str) -> None:
+        """Configure the move-overlay hotkey from a ``+``-separated string.
+
+        The trigger part is treated as a mouse button name
+        (e.g. ``"left"``, ``"right"``, ``"middle"``).
+
+        Example: ``"ctrl+shift+right"``.
+        """
+        modifiers, trigger, _ = parse_hotkey(config_str)
+        self._move_overlay_modifiers = modifiers
+        self._move_overlay_button = trigger
+        logger.info(
+            "[HOTKEY] move-overlay hotkey configured: modifiers=%s, button=%s",
+            self._move_overlay_modifiers, self._move_overlay_button,
         )
 
     def start(self) -> None:
@@ -285,19 +332,17 @@ class HotkeyManager(QObject):
 
         button_name: str = button.name if hasattr(button, "name") else str(button)
 
-        # Ctrl+Shift+LeftClick → screenshot
+        # Ctrl+Shift+LeftClick → screenshot (uses configurable hotkey)
         if (
-            button_name == _LEFT_BUTTON
-            and self._ctrl_pressed
-            and self._shift_pressed
+            button_name == self._screenshot_button
+            and self._check_modifiers(self._screenshot_modifiers)
         ):
             self.screenshot_requested.emit()
 
-        # Ctrl+Shift+RightClick → move overlay to cursor
-        if (
-            button_name == _RIGHT_BUTTON
-            and self._ctrl_pressed
-            and self._shift_pressed
+        # Ctrl+Shift+RightClick → move overlay to cursor (uses configurable hotkey)
+        elif (
+            button_name == self._move_overlay_button
+            and self._check_modifiers(self._move_overlay_modifiers)
         ):
             self.move_overlay_to_cursor.emit(x, y)
 
@@ -321,6 +366,13 @@ class HotkeyManager(QObject):
         if vk is not None and 0x30 <= vk <= 0x5A:
             return chr(vk).lower()
         return str(key).lower()
+
+    def _check_modifiers(self, required: list[str]) -> bool:
+        """Check if all required modifier keys are currently pressed."""
+        return all(
+            getattr(self, f"_{m.replace('_l', '').replace('_r', '')}_pressed", False)
+            for m in required
+        )
 
     # ------------------------------------------------------------------
     # Properties
