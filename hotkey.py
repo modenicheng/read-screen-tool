@@ -1,7 +1,7 @@
-"""Global hotkey management using pynput, bridged to Qt via pyqtSignal.
+"""Global hotkey management using pynput, bridged via signals.Signal.
 
 Provides a ``HotkeyManager`` that listens for global keyboard and mouse events
-in background threads and emits Qt signals on the main thread when hotkey
+in background threads and emits signals on the main thread when hotkey
 combinations are detected.
 
 Hotkeys (all configurable via ``set_*_hotkey()``):
@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QObject, Signal
+from signals import Signal
 
 if TYPE_CHECKING:
     from pynput.keyboard import Key, KeyCode
@@ -70,12 +70,12 @@ def parse_hotkey(config_str: str) -> tuple[list[str], str, int | None]:
     return modifiers, trigger_key, _name_to_vk(trigger_key)
 
 
-class HotkeyManager(QObject):
-    """Listens for global hotkeys via *pynput* and emits Qt signals.
+class HotkeyManager:
+    """Listens for global hotkeys via *pynput* and emits ``signals.Signal``.
 
-    All pynput callbacks execute on background threads.  Signal emission is
-    thread-safe — Qt automatically queues the emission on the receiver's
-    event-loop thread.
+    All pynput callbacks execute on background threads.  Signal emission uses
+    ``safe_emit()`` which marshals emission to the tkinter main thread via
+    ``after_idle()`` for thread safety when called from pynput background threads.
 
     Usage:
         manager = HotkeyManager()
@@ -84,26 +84,25 @@ class HotkeyManager(QObject):
         manager.start()
     """
 
-    screenshot_requested = Signal()
-    """Emitted when the configurable screenshot mouse hotkey is detected.
+    def __init__(self) -> None:
+        # -- Signals ---------------------------------------------------------
+        self.screenshot_requested = Signal()
+        """Emitted when the configurable screenshot mouse hotkey is detected.
 
-    Default: Ctrl+Shift+LeftClick.
-    """
+        Default: Ctrl+Shift+LeftClick.
+        """
 
-    toggle_overlay_requested = Signal()
-    """Emitted when Ctrl+Alt+A is pressed."""
+        self.toggle_overlay_requested = Signal()
+        """Emitted when Ctrl+Alt+A is pressed."""
 
-    move_overlay_to_cursor = Signal(int, int)
-    """Emitted when the configurable move-overlay mouse hotkey is detected.
+        self.move_overlay_to_cursor = Signal()
+        """Emitted when the configurable move-overlay mouse hotkey is detected.
 
-    Default: Ctrl+Shift+RightClick.  Carries (x, y) cursor position.
-    """
+        Default: Ctrl+Shift+RightClick.  Carries (x, y) cursor position.
+        """
 
-    alt_state_changed = Signal(bool)
-    """Emitted when the Alt key is pressed (True) or released (False) globally."""
-
-    def __init__(self, parent: QObject | None = None) -> None:
-        super().__init__(parent)
+        self.alt_state_changed = Signal()
+        """Emitted when the Alt key is pressed (True) or released (False) globally."""
 
         # -- Modifier state -------------------------------------------------
         self._ctrl_pressed: bool = False
@@ -264,7 +263,7 @@ class HotkeyManager(QObject):
         elif key_name in _ALT_KEYS:
             if not self._alt_pressed:
                 self._alt_pressed = True
-                self.alt_state_changed.emit(True)
+                self.alt_state_changed.safe_emit(True)
                 logger.info("[HOTKEY] alt pressed — _alt_pressed=True")
         else:
             # Non-modifier key — log when modifiers are active
@@ -294,7 +293,7 @@ class HotkeyManager(QObject):
                     logger.info(
                         "[HOTKEY] toggle hotkey detected → toggle_overlay_requested.emit()"
                     )
-                    self.toggle_overlay_requested.emit()
+                    self.toggle_overlay_requested.safe_emit()
 
     def _on_key_release(self, key: Key | KeyCode | None) -> None:
         """Handle keyboard release events."""
@@ -316,7 +315,7 @@ class HotkeyManager(QObject):
             self._shift_pressed = False
         elif key_name in _ALT_KEYS and self._alt_pressed:
             self._alt_pressed = False
-            self.alt_state_changed.emit(False)
+            self.alt_state_changed.safe_emit(False)
 
     def _on_mouse_click(self, x: int, y: int, button: Button, pressed: bool) -> None:
         """Handle mouse click events."""
@@ -337,14 +336,14 @@ class HotkeyManager(QObject):
             button_name == self._screenshot_button
             and self._check_modifiers(self._screenshot_modifiers)
         ):
-            self.screenshot_requested.emit()
+            self.screenshot_requested.safe_emit()
 
         # Ctrl+Shift+RightClick → move overlay to cursor (uses configurable hotkey)
         elif (
             button_name == self._move_overlay_button
             and self._check_modifiers(self._move_overlay_modifiers)
         ):
-            self.move_overlay_to_cursor.emit(x, y)
+            self.move_overlay_to_cursor.safe_emit(x, y)
 
     # ------------------------------------------------------------------
     # Helpers

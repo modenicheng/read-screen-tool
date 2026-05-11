@@ -44,8 +44,6 @@ def _parse_inline(text: str) -> list[tuple[str, tuple[str, ...]]]:
     if not text:
         return [("", ())]
 
-    segments: list[tuple[str, tuple[str, ...]]] = []
-
     # Phase 1 — code spans (highest priority, prevents inner formatting)
     code_map: dict[str, str] = {}
     _placeholder_id = 0
@@ -88,24 +86,43 @@ def _parse_inline(text: str) -> list[tuple[str, tuple[str, ...]]]:
 
     protected = _ITALIC_RE.sub(_replace_italic, protected)
 
-    # Build segments from protected text
-    tag_pattern = re.compile(r"\x00(CODE|BOLD|ITALIC)(\d+)\x00")
+    # Build segments — recursively expand nested placeholders
+    return _expand_placeholders(protected, code_map, bold_map, italic_map)
+
+
+# Compiled once at module level for reuse by _expand_placeholders.
+_PLACEHOLDER_RE = re.compile(r"\x00(CODE|BOLD|ITALIC)(\d+)\x00")
+
+
+def _expand_placeholders(
+    text: str,
+    code_map: dict[str, str],
+    bold_map: dict[str, str],
+    italic_map: dict[str, str],
+) -> list[tuple[str, tuple[str, ...]]]:
+    """Recursively expand placeholder markers, correctly nesting tags."""
+    segments: list[tuple[str, tuple[str, ...]]] = []
     pos = 0
-    for m in tag_pattern.finditer(protected):
+
+    for m in _PLACEHOLDER_RE.finditer(text):
         if m.start() > pos:
-            segments.append((protected[pos : m.start()], ()))
+            segments.append((text[pos : m.start()], ()))
         kind = m.group(1)
         placeholder = m.group(0)
         if kind == "CODE":
             segments.append((code_map[placeholder], ("code",)))
         elif kind == "BOLD":
-            segments.append((bold_map[placeholder], ("bold",)))
+            inner = _expand_placeholders(bold_map[placeholder], code_map, bold_map, italic_map)
+            for seg_text, seg_tags in inner:
+                segments.append((seg_text, ("bold",) + seg_tags))
         elif kind == "ITALIC":
-            segments.append((italic_map[placeholder], ("italic",)))
+            inner = _expand_placeholders(italic_map[placeholder], code_map, bold_map, italic_map)
+            for seg_text, seg_tags in inner:
+                segments.append((seg_text, ("italic",) + seg_tags))
         pos = m.end()
 
-    if pos < len(protected):
-        segments.append((protected[pos:], ()))
+    if pos < len(text):
+        segments.append((text[pos:], ()))
 
     return segments or [("", ())]
 
@@ -127,6 +144,7 @@ class OutputOverlay:
     """Transparent frameless always-on-top text overlay."""
 
     text_added = Signal(str)
+    status_changed = Signal(str)
 
     def __init__(
         self,
@@ -169,6 +187,19 @@ class OutputOverlay:
             state=tk.DISABLED,
         )
         self._text_widget.pack(fill=tk.BOTH, expand=True)
+
+        # Agent status label — dim, small, italic, at bottom
+        self._status_label = tk.Label(
+            self._window,
+            text="",
+            bg="#1e1e1e",
+            fg="#888888",
+            font=(font_family, max(9, font_size - 3), "italic"),
+            anchor="w",
+            padx=8,
+            pady=2,
+        )
+        self._status_label.pack(side=tk.BOTTOM, fill=tk.X)
 
         # --- Tag configurations for markdown styles ---
         self._text_widget.tag_configure(
@@ -312,6 +343,16 @@ class OutputOverlay:
         self._text_widget.config(state=tk.NORMAL)
         self._text_widget.delete("1.0", tk.END)
         self._text_widget.config(state=tk.DISABLED)
+
+    def set_status(self, text: str) -> None:
+        """Update the agent status indicator text."""
+        self._status_label.config(text=text)
+        self.status_changed.emit(text)
+
+    def clear_status(self) -> None:
+        """Clear the agent status indicator."""
+        self._status_label.config(text="")
+        self.status_changed.emit("")
 
     # -----------------------------------------------------------------------
     # Markdown rendering

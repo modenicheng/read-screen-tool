@@ -1,6 +1,8 @@
 """Tests for OCR engine wrapper."""
 
-from unittest.mock import MagicMock, patch
+import sys
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -13,23 +15,41 @@ def ocr_engine():
     return OcrEngine(language="ch", device="cpu")
 
 
+@pytest.fixture
+def fake_ocr_modules(monkeypatch):
+    reader = MagicMock()
+    reader.readtext.return_value = []
+    reader_cls = MagicMock(return_value=reader)
+
+    monkeypatch.setitem(sys.modules, "easyocr", SimpleNamespace(Reader=reader_cls))
+
+    return reader_cls, reader
+
+
 class TestOcrInitialization:
+    def test_opencv_runtime_is_available_for_easyocr(self):
+        """EasyOCR needs a real OpenCV module, not an empty cv2 namespace."""
+        import cv2
+
+        assert hasattr(cv2, "cvtColor")
+
     def test_engine_not_loaded_initially(self, ocr_engine):
         """OCR model should NOT be loaded at init time (lazy loading)."""
         assert not ocr_engine.is_loaded
         assert ocr_engine._language == "ch"
         assert ocr_engine._device == "cpu"
 
-    def test_engine_loaded_after_recognize(self, ocr_engine):
+    def test_engine_loaded_after_recognize(self, ocr_engine, fake_ocr_modules):
         """recognize() should trigger model loading."""
-        mock_ocr = MagicMock()
-        mock_ocr.predict.return_value = []
+        reader_cls, reader = fake_ocr_modules
 
-        with patch("paddleocr.PaddleOCR", return_value=mock_ocr):
-            result = ocr_engine.recognize(np.zeros((100, 100, 3), dtype=np.uint8))
+        image = np.zeros((100, 100, 3), dtype=np.uint8)
+        result = ocr_engine.recognize(image)
 
         assert ocr_engine.is_loaded
         assert result == ""
+        reader_cls.assert_called_once_with(["ch_sim", "en"], gpu=False)
+        reader.readtext.assert_called_once_with(image, detail=0)
 
     def test_default_language_and_device(self):
         """Default values should be 'ch' and 'cpu'."""
@@ -48,101 +68,125 @@ class TestOcrInitialization:
 
 
 class TestTextRecognition:
-    def test_recognize_single_result(self, ocr_engine):
-        """Single dict result should extract rec_text."""
-        mock_ocr = MagicMock()
-        mock_ocr.predict.return_value = [{"rec_text": "Hello World", "rec_score": 0.99}]
+    def test_recognize_single_result(self, ocr_engine, fake_ocr_modules):
+        """Single EasyOCR text result should be returned."""
+        _, reader = fake_ocr_modules
+        reader.readtext.return_value = ["Hello World"]
 
-        with patch("paddleocr.PaddleOCR", return_value=mock_ocr):
-            result = ocr_engine.recognize(np.zeros((100, 100, 3), dtype=np.uint8))
+        result = ocr_engine.recognize(np.zeros((100, 100, 3), dtype=np.uint8))
 
         assert result == "Hello World"
 
-    def test_recognize_multiple_results(self, ocr_engine):
-        """Multiple dict results should be joined with newlines."""
-        mock_ocr = MagicMock()
-        mock_ocr.predict.return_value = [
-            {"rec_text": "Line 1", "rec_score": 0.99},
-            {"rec_text": "Line 2", "rec_score": 0.98},
-        ]
+    def test_recognize_multiple_results(self, ocr_engine, fake_ocr_modules):
+        """Multiple EasyOCR text results should be joined with newlines."""
+        _, reader = fake_ocr_modules
+        reader.readtext.return_value = ["Line 1", "Line 2"]
 
-        with patch("paddleocr.PaddleOCR", return_value=mock_ocr):
-            result = ocr_engine.recognize(np.zeros((100, 100, 3), dtype=np.uint8))
+        result = ocr_engine.recognize(np.zeros((100, 100, 3), dtype=np.uint8))
 
         assert result == "Line 1\nLine 2"
 
-    def test_recognize_empty_results(self, ocr_engine):
+    def test_recognize_empty_results(self, ocr_engine, fake_ocr_modules):
         """Empty results list should return empty string."""
-        mock_ocr = MagicMock()
-        mock_ocr.predict.return_value = []
+        _, reader = fake_ocr_modules
+        reader.readtext.return_value = []
 
-        with patch("paddleocr.PaddleOCR", return_value=mock_ocr):
-            result = ocr_engine.recognize(np.zeros((100, 100, 3), dtype=np.uint8))
+        result = ocr_engine.recognize(np.zeros((100, 100, 3), dtype=np.uint8))
 
         assert result == ""
 
-    def test_recognize_none_results(self, ocr_engine):
+    def test_recognize_none_results(self, ocr_engine, fake_ocr_modules):
         """None results should return empty string."""
-        mock_ocr = MagicMock()
-        mock_ocr.predict.return_value = None
+        _, reader = fake_ocr_modules
+        reader.readtext.return_value = None
 
-        with patch("paddleocr.PaddleOCR", return_value=mock_ocr):
-            result = ocr_engine.recognize(np.zeros((100, 100, 3), dtype=np.uint8))
+        result = ocr_engine.recognize(np.zeros((100, 100, 3), dtype=np.uint8))
 
         assert result == ""
 
-    def test_recognize_skips_empty_text(self, ocr_engine):
+    def test_recognize_skips_empty_text(self, ocr_engine, fake_ocr_modules):
         """Results with empty rec_text should be skipped."""
-        mock_ocr = MagicMock()
-        mock_ocr.predict.return_value = [
-            {"rec_text": "", "rec_score": 0.5},
-            {"rec_text": "Valid Text", "rec_score": 0.95},
-            {"rec_text": "", "rec_score": 0.3},
-        ]
+        _, reader = fake_ocr_modules
+        reader.readtext.return_value = ["", "Valid Text", "   "]
 
-        with patch("paddleocr.PaddleOCR", return_value=mock_ocr):
-            result = ocr_engine.recognize(np.zeros((100, 100, 3), dtype=np.uint8))
+        result = ocr_engine.recognize(np.zeros((100, 100, 3), dtype=np.uint8))
 
         assert result == "Valid Text"
 
-    def test_recognize_list_of_lists(self, ocr_engine):
-        """Nested list format (per-line results) should be handled."""
-        mock_ocr = MagicMock()
-        mock_ocr.predict.return_value = [
-            [{"rec_text": "Line A", "rec_score": 0.99}],
-            [{"rec_text": "Line B", "rec_score": 0.97}],
+    def test_recognize_default_easyocr_tuple_results(self, ocr_engine, fake_ocr_modules):
+        """Default EasyOCR tuple results should also be handled defensively."""
+        _, reader = fake_ocr_modules
+        reader.readtext.return_value = [
+            ([[0, 0], [10, 0], [10, 10], [0, 10]], "Line A", 0.99),
+            ([[0, 20], [10, 20], [10, 30], [0, 30]], "Line B", 0.97),
         ]
 
-        with patch("paddleocr.PaddleOCR", return_value=mock_ocr):
-            result = ocr_engine.recognize(np.zeros((100, 100, 3), dtype=np.uint8))
+        result = ocr_engine.recognize(np.zeros((100, 100, 3), dtype=np.uint8))
 
         assert result == "Line A\nLine B"
 
 
 class TestPILConversion:
-    def test_recognize_from_pil(self, ocr_engine):
+    def test_recognize_from_pil(self, ocr_engine, fake_ocr_modules):
         """PIL Image should be converted to numpy and recognized."""
         from PIL import Image
 
         img = Image.new("RGB", (100, 100), color="white")
 
-        mock_ocr = MagicMock()
-        mock_ocr.predict.return_value = [{"rec_text": "PIL Text", "rec_score": 0.95}]
+        _, reader = fake_ocr_modules
+        reader.readtext.return_value = ["PIL Text"]
 
-        with patch("paddleocr.PaddleOCR", return_value=mock_ocr):
-            result = ocr_engine.recognize_from_pil(img)
+        result = ocr_engine.recognize_from_pil(img)
 
         assert result == "PIL Text"
 
-    def test_model_loaded_only_once(self, ocr_engine):
-        """Multiple recognize() calls should load model only once."""
-        mock_ocr = MagicMock()
-        mock_ocr.predict.return_value = []
+    def test_reader_is_reused_across_captures(self, ocr_engine, fake_ocr_modules):
+        """Reader is created once and reused across captures to avoid re-init crashes."""
+        reader_cls, _ = fake_ocr_modules
 
-        with patch("paddleocr.PaddleOCR", return_value=mock_ocr) as mock_paddle:
-            ocr_engine.recognize(np.zeros((100, 100, 3), dtype=np.uint8))
-            ocr_engine.recognize(np.zeros((100, 100, 3), dtype=np.uint8))
-            ocr_engine.recognize(np.zeros((100, 100, 3), dtype=np.uint8))
+        ocr_engine.recognize(np.zeros((100, 100, 3), dtype=np.uint8))
+        ocr_engine.recognize(np.zeros((100, 100, 3), dtype=np.uint8))
+        ocr_engine.recognize(np.zeros((100, 100, 3), dtype=np.uint8))
 
-        # PaddleOCR should be instantiated only once
-        assert mock_paddle.call_count == 1
+        assert reader_cls.call_count == 1
+
+    @pytest.mark.parametrize(
+        ("language", "expected_languages"),
+        [
+            ("ch", ["ch_sim", "en"]),
+            ("ch_sim", ["ch_sim", "en"]),
+            ("en", ["en"]),
+            ("ja,en", ["ja", "en"]),
+        ],
+    )
+    def test_language_config_maps_to_easyocr_lang_list(
+        self, fake_ocr_modules, language, expected_languages
+    ):
+        """Configured language should be converted to EasyOCR language list."""
+        from ocr import OcrEngine
+
+        reader_cls, _ = fake_ocr_modules
+        engine = OcrEngine(language=language, device="cpu")
+
+        engine.recognize(np.zeros((100, 100, 3), dtype=np.uint8))
+
+        reader_cls.assert_called_once_with(expected_languages, gpu=False)
+
+    @pytest.mark.parametrize(
+        ("device", "expected_gpu"),
+        [
+            ("cpu", False),
+            ("gpu", True),
+            ("cuda:1", "cuda:1"),
+        ],
+    )
+    def test_device_config_maps_to_easyocr_gpu(self, fake_ocr_modules, device, expected_gpu):
+        """Configured device should be converted to EasyOCR gpu setting."""
+        from ocr import OcrEngine
+
+        reader_cls, _ = fake_ocr_modules
+        engine = OcrEngine(language="en", device=device)
+
+        engine.recognize(np.zeros((100, 100, 3), dtype=np.uint8))
+
+        reader_cls.assert_called_once_with(["en"], gpu=expected_gpu)

@@ -4,40 +4,59 @@ import base64
 import io
 import json
 import logging
+import queue
+import threading
 
 import numpy as np
 from openai import OpenAI
 from PIL import Image
-from PySide6.QtCore import QObject, QThread, Signal, Slot
+
+from signals import Signal
 
 logger = logging.getLogger(__name__)
 
 
-class _LlmWorker(QObject):
-    """Worker QObject that executes streaming requests on a persistent QThread.
+class _LlmWorker:
+    """Worker that executes streaming requests on a persistent thread.
 
-    Lives on a dedicated background thread.  Receives message lists via the
-    ``request`` signal and calls ``LlmClient._stream_request()`` synchronously.
+    Runs on a dedicated background thread.  Receives message lists via an
+    internal ``queue.Queue`` and calls ``LlmClient._stream_request()``
+    synchronously on that thread.
     """
 
-    request = Signal(list)  # messages: list[dict]
-
-    def __init__(self, client: "LlmClient", parent: QObject | None = None) -> None:
-        super().__init__(parent)
+    def __init__(self, client: "LlmClient") -> None:
         self._client = client
+        self._request_queue: queue.Queue = queue.Queue()
 
-    @Slot(list)
-    def _on_request(self, messages: list[dict]) -> None:
-        self._client._stream_request(messages)
+    def enqueue(self, messages: list[dict]) -> None:
+        """Put a message batch into the request queue."""
+        self._request_queue.put(messages)
+
+    def run(self) -> None:
+        """Block on the request queue forever; call _stream_request for each batch.
+
+        A ``None`` sentinel signals clean shutdown.
+        """
+        while True:
+            messages = self._request_queue.get()
+            if messages is None:  # sentinel for shutdown
+                break
+            try:
+                self._client._stream_request(messages)
+            except Exception as e:
+                logging.getLogger(__name__).error(
+                    "LLM worker error: %s", e, exc_info=True
+                )
 
 
-class LlmClient(QObject):
-    """Qt-integrated LLM client for OpenAI-compatible APIs.
+class LlmClient:
+    """LLM client for OpenAI-compatible APIs.
 
     Handles streaming responses, tool calling with delta accumulation,
     vision input (base64 images), and knowledge grep integration.
 
-    Signals are thread-safe for cross-thread emission.
+    Signals use :class:`~signals.Signal` and are thread-safe for cross-thread
+    emission via ``safe_emit()``.
 
     Usage:
         client = LlmClient(config)
@@ -48,23 +67,13 @@ class LlmClient(QObject):
         client.send("Hello", image=numpy_array)
     """
 
-    # Streaming signals
-    token_received = Signal(str)  # Individual token from stream
-    reasoning_token_received = Signal(str)  # Thinking content token
-    response_complete = Signal(str)  # Full accumulated response text
-    error_occurred = Signal(str)  # Error message
-    tool_call_requested = Signal(object)  # Tool call dict (name, arguments)
-    tool_result_ready = Signal(str, str)  # (tool_call_id, result)
-
-    def __init__(self, provider_config=None, parent=None):
+    def __init__(self, provider_config=None):
         """Initialize LLM client.
 
         Args:
             provider_config: ProviderConfig from config.py, or dict with
                            {name, api_key, base_url}
-            parent: Parent QObject
         """
-        super().__init__(parent)
         self._provider = provider_config
         self._client: OpenAI | None = None
         self._session = None  # ConversationSession, set externally
@@ -72,12 +81,17 @@ class LlmClient(QObject):
         self._current_model = ""
         self._tools: list[dict] = []
 
-        # Persistent worker thread (created in configure())
-        self._request_thread: QThread | None = None
-        self._request_worker: _LlmWorker | None = None
+        # Streaming signals (instance-level, thread-safe via safe_emit)
+        self.token_received = Signal()
+        self.reasoning_token_received = Signal()
+        self.response_complete = Signal()
+        self.error_occurred = Signal()
+        self.tool_call_requested = Signal()
+        self.tool_result_ready = Signal()
 
-        # Auto-stop the worker thread when this object is destroyed
-        self.destroyed.connect(self.stop)
+        # Persistent worker thread (created in configure())
+        self._request_thread: threading.Thread | None = None
+        self._request_worker: _LlmWorker | None = None
 
     def configure(
         self,
@@ -127,9 +141,9 @@ class LlmClient(QObject):
         # "QThread: Destroyed while thread is still running" crash that occurs
         # when ad-hoc threads are overwritten without cleanup.
         self._request_worker = _LlmWorker(self)
-        self._request_thread = QThread(self)
-        self._request_worker.moveToThread(self._request_thread)
-        self._request_worker.request.connect(self._request_worker._on_request)
+        self._request_thread = threading.Thread(
+            target=self._request_worker.run, daemon=True
+        )
         self._request_thread.start()
 
     def send(
@@ -140,7 +154,7 @@ class LlmClient(QObject):
     ):
         """Send a message to the LLM.
 
-        Dispatches to the persistent worker thread via signal/slot.
+        Dispatches to the persistent worker thread via queue.
 
         Args:
             user_text: User's text input
@@ -168,7 +182,7 @@ class LlmClient(QObject):
                 self._session.add_message(role="user", content=user_text)
 
         if self._request_worker is not None:
-            self._request_worker.request.emit(messages)
+            self._request_worker.enqueue(messages)
 
     def _build_messages(
         self,
@@ -252,7 +266,7 @@ class LlmClient(QObject):
             }
 
             if self._client is None:
-                self.error_occurred.emit("LLM client not configured. Call configure() first.")
+                self.error_occurred.safe_emit("LLM client not configured. Call configure() first.")
                 return
 
             if self._tools:
@@ -271,7 +285,7 @@ class LlmClient(QObject):
                 # Handle reasoning content (thinking mode)
                 if getattr(delta, "reasoning_content", None):
                     accumulated_reasoning += delta.reasoning_content
-                    self.reasoning_token_received.emit(delta.reasoning_content)
+                    self.reasoning_token_received.safe_emit(delta.reasoning_content)
 
                 # Handle tool calls (with DeepSeek quirk handling)
                 if delta.tool_calls:
@@ -294,7 +308,7 @@ class LlmClient(QObject):
                 # Handle regular content
                 if delta.content:
                     accumulated_content += delta.content
-                    self.token_received.emit(delta.content)
+                    self.token_received.safe_emit(delta.content)
 
                 # Check for stream end.
                 # DeepSeek quirk: finish_reason may be "tool_calls" even when delta
@@ -324,7 +338,7 @@ class LlmClient(QObject):
                         tool_calls.append(tool_call)
 
                         # Emit signal for each tool call
-                        self.tool_call_requested.emit(
+                        self.tool_call_requested.safe_emit(
                             {
                                 "id": buf["id"],
                                 "name": buf["name"],
@@ -351,11 +365,11 @@ class LlmClient(QObject):
                 )
 
             # Emit completion signal
-            self.response_complete.emit(accumulated_content)
+            self.response_complete.safe_emit(accumulated_content)
 
         except Exception as e:
             logger.error(f"LLM request error: {e}", exc_info=True)
-            self.error_occurred.emit(str(e))
+            self.error_occurred.safe_emit(str(e))
 
     def submit_tool_result(self, tool_call_id: str, result: str):
         """Submit a tool execution result back to the conversation.
@@ -389,13 +403,14 @@ class LlmClient(QObject):
             messages.append({"role": "user", "content": user_text})
 
         if self._request_worker:
-            self._request_worker.request.emit(messages)
+            self._request_worker.enqueue(messages)
 
     def stop(self) -> None:
         """Stop the persistent worker thread and clean up."""
-        if self._request_thread is not None and self._request_thread.isRunning():
-            self._request_thread.quit()
-            self._request_thread.wait(5000)
+        if self._request_thread is not None and self._request_thread.is_alive():
+            if self._request_worker is not None:
+                self._request_worker._request_queue.put(None)  # sentinel
+            self._request_thread.join(timeout=5)
             self._request_worker = None
             self._request_thread = None
 

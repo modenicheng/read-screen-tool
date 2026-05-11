@@ -1,7 +1,9 @@
 """Lightweight signal/slot mechanism for non-Qt code.
 
-Provides Signal (callback list) and SignalSpy (test helper) as drop-in
-replacements for PySide6 Signal and QSignalSpy.
+Provides Signal (callback list) and SignalSpy (test helper) as simple
+callback-based alternatives to PySide6 Signal and QSignalSpy.
+``safe_emit()`` marshals callbacks to the tkinter main thread for
+thread-safe cross-thread signal emission.
 """
 
 from __future__ import annotations
@@ -11,7 +13,12 @@ from typing import Any
 
 
 class Signal:
-    """Callback-based signal. Supports .connect(), .disconnect(), .emit()."""
+    """Callback-based signal. Supports .connect(), .disconnect(), .emit().
+
+    ``emit()`` invokes callbacks synchronously on the calling thread.
+    Use ``safe_emit()`` when calling from a background thread — it
+    marshals the callback to the tkinter main thread via ``after_idle()``.
+    """
 
     def __init__(self, *param_types: type) -> None:
         self._callbacks: list[Callable[..., None]] = []
@@ -28,6 +35,17 @@ class Signal:
     def emit(self, *args: Any) -> None:
         for cb in self._callbacks:
             cb(*args)
+
+    def safe_emit(self, *args: Any) -> None:
+        """Thread-safe emission — schedules emit() on tkinter's main thread.
+
+        Use when emitting from a background thread to avoid tkinter
+        thread-safety violations in connected callbacks.
+        """
+        from overlay import _get_root
+
+        root = _get_root()
+        root.after_idle(lambda: self.emit(*args))
 
 
 class SignalSpy:

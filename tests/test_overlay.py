@@ -104,6 +104,30 @@ class TestParseInline:
         assert len(result) == 1
         assert result[0] == ("**not bold**", ("code",))
 
+    def test_bold_containing_code(self) -> None:
+        result = _parse_inline("**核心逻辑 (`ocr.py`)**")
+        assert result == [
+            ("核心逻辑 (", ("bold",)),
+            ("ocr.py", ("bold", "code")),
+            (")", ("bold",)),
+        ]
+
+    def test_italic_containing_code(self) -> None:
+        result = _parse_inline("*see `config.yaml` for details*")
+        assert result == [
+            ("see ", ("italic",)),
+            ("config.yaml", ("italic", "code")),
+            (" for details", ("italic",)),
+        ]
+
+    def test_code_between_bold_and_plain(self) -> None:
+        result = _parse_inline("`code` and **bold**")
+        assert result == [
+            ("code", ("code",)),
+            (" and ", ()),
+            ("bold", ("bold",)),
+        ]
+
 
 # ---------------------------------------------------------------------------
 # OutputOverlay creation tests
@@ -419,6 +443,48 @@ class TestShadowEffect:
         widget = OutputOverlay(shadow=False)
         assert widget._shadow_effect is None
         widget.close()
+
+
+# ---------------------------------------------------------------------------
+# Agent status
+# ---------------------------------------------------------------------------
+
+
+class TestAgentStatus:
+    """Tests for set_status / clear_status / status_changed Signal."""
+
+    def test_set_status_updates_label(self, overlay: OutputOverlay) -> None:
+        """set_status() sets the label text."""
+        overlay.set_status("Thinking...")
+        assert overlay._status_label.cget("text") == "Thinking..."
+
+    def test_clear_status_clears_label(self, overlay: OutputOverlay) -> None:
+        """clear_status() empties the label text."""
+        overlay.set_status("搜索test...")
+        overlay.clear_status()
+        assert overlay._status_label.cget("text") == ""
+
+    def test_set_status_emits_signal(self, overlay: OutputOverlay) -> None:
+        """set_status() emits the status_changed signal."""
+        spy = SignalSpy(overlay.status_changed)
+        overlay.set_status("读取文件")
+        assert spy.count() == 1
+        assert spy.at(0)[0] == "读取文件"
+
+    def test_clear_status_emits_empty_signal(self, overlay: OutputOverlay) -> None:
+        """clear_status() emits status_changed with empty string."""
+        overlay.set_status("Thinking...")
+        spy = SignalSpy(overlay.status_changed)
+        overlay.clear_status()
+        assert spy.count() == 1
+        assert spy.at(0)[0] == ""
+
+    def test_multiple_set_status_updates(self, overlay: OutputOverlay) -> None:
+        """Multiple set_status calls update the label correctly."""
+        overlay.set_status("Thinking...")
+        overlay.set_status("搜索test...")
+        overlay.set_status("读取文件")
+        assert overlay._status_label.cget("text") == "读取文件"
 
 
 # ---------------------------------------------------------------------------

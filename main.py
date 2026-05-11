@@ -7,16 +7,17 @@ transparent output overlay.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import sys
 import tempfile
+import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
-from PySide6.QtWidgets import QApplication
 
 from config import AppConfig, load_config
 from knowledge import (
@@ -29,7 +30,7 @@ from knowledge import (
 )
 from llm import LlmClient
 from ocr import OcrEngine
-from overlay import OutputOverlay
+from overlay import OutputOverlay, _get_root
 from screenshot import ScreenshotOverlay
 from session import ConversationSession
 
@@ -51,38 +52,44 @@ _NO_OCR_PROMPT = "No text was detected in the selected region."
 
 
 # ---------------------------------------------------------------------------
-# OCR worker — runs in a background QThread to keep the main thread free
+# OCR worker — runs in a daemon thread to keep the main thread free
 # ---------------------------------------------------------------------------
 
 
-class _OcrWorker(QObject):
-    """Runs PaddleOCR in a dedicated QThread to avoid blocking the UI."""
+class _OcrWorker:
+    """Runs OCR in a daemon thread to keep the main thread free."""
 
-    ocr_completed = Signal(str)  # (ocr_text)
-    ocr_failed = Signal(str)  # (error_msg)
-
-    def __init__(self, ocr_engine: OcrEngine, parent: QObject | None = None) -> None:
-        super().__init__(parent)
+    def __init__(self, ocr_engine: OcrEngine) -> None:
         self._ocr_engine = ocr_engine
 
-    @Slot(np.ndarray)
-    def process(self, image: np.ndarray) -> None:
-        """Execute OCR on the given image. Emits result via signal."""
-        try:
-            text = self._ocr_engine.recognize(image)
-            self.ocr_completed.emit(text)
-        except Exception as e:
-            self.ocr_failed.emit(str(e))
+    def process(self, image: np.ndarray,
+                on_completed: Callable[[str], None],
+                on_failed: Callable[[str], None]) -> None:
+        """Run OCR in a daemon thread, callback on tkinter main thread."""
+        def _do_ocr() -> None:
+            try:
+                logger.info(
+                    "[OCR] process() — start image shape=%s, dtype=%s",
+                    image.shape,
+                    image.dtype,
+                )
+                text = self._ocr_engine.recognize(image)
+                logger.info("[OCR] process() — completed text_len=%d", len(text))
+                _get_root().after_idle(lambda: on_completed(text))
+            except Exception as exc:
+                err_msg = str(exc)
+                _get_root().after_idle(lambda: on_failed(err_msg))
+        threading.Thread(target=_do_ocr, daemon=True).start()
 
 
-class ReadScreenApp(QObject):
+class ReadScreenApp:
     """Orchestrates all application modules.
 
     Signal flow:
         HotkeyManager.screenshot_requested → ScreenshotOverlay.start_selection
         ScreenshotOverlay.screenshot_taken → _queue_screenshot
-        _queue_screenshot → _ocr_requested (cross-thread) if OCR needed
-        _OcrWorker.ocr_completed → _on_ocr_completed → LlmClient.send
+        _queue_screenshot → _OcrWorker.process (daemon thread) if OCR needed
+        _OcrWorker → _on_ocr_completed → LlmClient.send
         LlmClient.token_received → OutputOverlay.append_text
         LlmClient.response_complete → _on_response_complete (+ queue dequeue)
         LlmClient.tool_call_requested → _on_tool_call_requested → grep_knowledge
@@ -90,19 +97,11 @@ class ReadScreenApp(QObject):
         HotkeyManager.toggle_overlay_requested → OutputOverlay.toggle_visibility
         TrayManager.show_requested → OutputOverlay.show
         TrayManager.hide_requested → OutputOverlay.hide
-        TrayManager.exit_requested → QApplication.quit
+        TrayManager.exit_requested → _handle_exit
     """
 
-    _ocr_requested = Signal(np.ndarray)  # cross-thread: main → OCR worker
-
-    def __init__(self, config: AppConfig, parent: QObject | None = None) -> None:
-        """Initialize the application with a validated configuration.
-
-        Args:
-            config: Fully-loaded AppConfig instance.
-            parent: Parent QObject.
-        """
-        super().__init__(parent)
+    def __init__(self, config: AppConfig) -> None:
+        """Initialize the application with a validated configuration."""
         self._config = config
 
         # Active model and provider
@@ -139,18 +138,13 @@ class ReadScreenApp(QObject):
         self._pending_screenshot: np.ndarray | None = None
         self._processing = False
         self._pending_responses = 0  # counts expected response_complete signals
+        self._tool_calls_pending = 0  # counts unhandled tool calls in current response
+        self._pending_tool_info: list[dict[str, Any]] = []
 
-        # OCR worker thread (only for non-vision models)
+        # OCR worker (daemon threads, only for non-vision models)
         self._ocr_worker: _OcrWorker | None = None
-        self._ocr_thread: QThread | None = None
         if self._ocr_engine is not None:
-            self._ocr_thread = QThread(self)
             self._ocr_worker = _OcrWorker(self._ocr_engine)
-            self._ocr_worker.moveToThread(self._ocr_thread)
-            self._ocr_worker.ocr_completed.connect(self._on_ocr_completed)
-            self._ocr_worker.ocr_failed.connect(self._on_ocr_failed)
-            self._ocr_requested.connect(self._ocr_worker.process)
-            self._ocr_thread.start()
 
         # Screenshot overlay
         self._screenshot_overlay = ScreenshotOverlay()
@@ -199,9 +193,8 @@ class ReadScreenApp(QObject):
         # Wire all signals
         self._wire_signals()
 
-        # QTimer to pump tkinter event loop (~30ms interval)
-        self._tk_timer = QTimer(self)
-        self._tk_timer.timeout.connect(self._output_overlay.pump)
+        # tkinter pump loop state
+        self._tk_pump_id: str | None = None
 
     # -----------------------------------------------------------------------
     # Signal wiring
@@ -233,18 +226,15 @@ class ReadScreenApp(QObject):
             self._tray.exit_requested.connect(self._handle_exit)
 
     # -----------------------------------------------------------------------
-    # Overlay toggle — QObject bridge for thread-safe tkinter calls
+    # Overlay toggle — bridge for thread-safe tkinter calls
     # -----------------------------------------------------------------------
 
-    @Slot()
     def _toggle_overlay(self) -> None:
-        """Thread-safe bridge: PySide6 signal → tkinter toggle_visibility."""
         logger.info("[MAIN] _toggle_overlay() called")
         self._output_overlay.toggle_visibility()
 
-    @Slot(int, int)
     def _move_overlay_to_cursor(self, x: int, y: int) -> None:
-        """Thread-safe bridge: PySide6 signal → tkinter move_to_cursor."""
+        """Bridge: hotkey signal → tkinter move_to_cursor."""
         logger.info("[MAIN] _move_overlay_to_cursor(%d, %d)", x, y)
         self._output_overlay.move_to_cursor(x, y)
 
@@ -297,11 +287,15 @@ class ReadScreenApp(QObject):
             image.shape, self._model.vision, self._ocr_worker is not None,
         )
 
+        # Show "Thinking..." status while waiting for LLM/OCR
+        self._pending_tool_info = []
+        self._output_overlay.set_status("Thinking...")
+
         if self._model.vision:
             self._llm_client.send(_VISION_PROMPT, image=image)
         elif self._ocr_worker is not None:
-            # Emit signal → queued cross-thread invocation of OCR worker
-            self._ocr_requested.emit(image)
+            # Run OCR in daemon thread, callback on completion
+            self._ocr_worker.process(image, self._on_ocr_completed, self._on_ocr_failed)
         else:
             logger.warning("No OCR engine available for non-vision model.")
             self._finish_processing()
@@ -342,6 +336,8 @@ class ReadScreenApp(QObject):
             "[MAIN] _on_response_complete() — text_len=%d, pending_responses=%d",
             len(text), self._pending_responses,
         )
+        self._output_overlay.clear_status()
+        self._pending_tool_info = []
         if text.strip():
             self._output_overlay.add_separator()
 
@@ -355,6 +351,16 @@ class ReadScreenApp(QObject):
             )
             self._session.compress()
 
+        # If tool calls were collected during the just-finished response,
+        # submit them all at once with a single continue_after_tool call.
+        # This avoids 400 errors when the LLM makes multiple tool calls in
+        # a single response (all results must be submitted together).
+        if self._tool_calls_pending > 0:
+            self._pending_responses += 1  # expect continuation response
+            self._tool_calls_pending = 0
+            self._llm_client.continue_after_tool()
+            self._output_overlay.set_status("Thinking...")
+
         # Dequeue counter: each response_complete decrements.
         # Tool calls increment the counter so _finish_processing only fires
         # after the *final* response (including tool continuations).
@@ -366,15 +372,51 @@ class ReadScreenApp(QObject):
     def _on_llm_error(self, error_msg: str) -> None:
         """Display LLM errors in the output overlay and release the queue."""
         logger.error("[MAIN] _on_llm_error() — %s", error_msg)
+        self._output_overlay.clear_status()
         self._output_overlay.append_text(f"[Error: {error_msg}]")
         self._output_overlay.add_separator()
         if self._pending_responses > 0:
             self._pending_responses = 0
+            self._tool_calls_pending = 0
+            self._pending_tool_info = []
             self._finish_processing()
 
     # -----------------------------------------------------------------------
     # Tool calling
     # -----------------------------------------------------------------------
+
+    def _update_agent_status(self) -> None:
+        """Build and display the agent status from pending tool calls.
+
+        Grep tools show "搜索<pattern>...". Multiple grep patterns are
+        joined with "|". If the combined string exceeds ~40 characters,
+        shows "搜索<n>个关键词中...". Other tools just show their name.
+        """
+        grep_patterns: list[str] = []
+        other_tools: list[str] = []
+
+        for t in self._pending_tool_info:
+            name = t.get("name", "")
+            if name == "grep_knowledge":
+                pattern = str(t.get("arguments", {}).get("pattern", ""))
+                if pattern:
+                    grep_patterns.append(pattern)
+            else:
+                other_tools.append(name)
+
+        parts: list[str] = []
+        if grep_patterns:
+            combined = "|".join(grep_patterns)
+            if len(combined) > 40:
+                parts.append(f"搜索{len(grep_patterns)}个关键词中...")
+            else:
+                parts.append(f"搜索{combined}...")
+        if other_tools:
+            parts.append(", ".join(other_tools))
+
+        status = " | ".join(parts) if parts else ""
+        if status:
+            self._output_overlay.set_status(status)
 
     def _on_tool_call_requested(self, tool_call: dict[str, Any]) -> None:
         """Dispatch tool calls from the LLM.
@@ -384,9 +426,10 @@ class ReadScreenApp(QObject):
         - ``read_file``: Read a file from knowledge/ or memory/ directories.
         - ``write_file``: Write a file to knowledge/ or memory/ directories.
 
-        The tool result is submitted back to the LLM client, which continues
-        the conversation.  Increments the response counter since
-        ``continue_after_tool`` will produce another ``response_complete``.
+        Tool results are submitted to the session but NOT immediately
+        continued.  When multiple tool calls arrive in a single LLM response,
+        all results are batched and ``continue_after_tool`` is called once
+        from ``_on_response_complete``, avoiding 400 errors from the API.
         """
         name = tool_call.get("name", "")
         tc_id = tool_call.get("id", "")
@@ -408,43 +451,53 @@ class ReadScreenApp(QObject):
                 knowledge_dir=knowledge_dir,
             )
 
-            self._pending_responses += 1
             self._llm_client.submit_tool_result(tc_id, result)
-            self._llm_client.continue_after_tool()
+            self._tool_calls_pending += 1
+            self._pending_tool_info.append(tool_call)
+            self._update_agent_status()
 
         elif name == "read_file":
             file_path = str(args.get("file_path", ""))
             result = read_file(file_path=file_path, allowed_dirs=allowed_dirs)
 
-            self._pending_responses += 1
             self._llm_client.submit_tool_result(tc_id, result)
-            self._llm_client.continue_after_tool()
+            self._tool_calls_pending += 1
+            self._pending_tool_info.append(tool_call)
+            self._update_agent_status()
 
         elif name == "write_file":
             file_path = str(args.get("file_path", ""))
             content = str(args.get("content", ""))
             result = write_file(file_path=file_path, content=content, allowed_dirs=allowed_dirs)
 
-            self._pending_responses += 1
             self._llm_client.submit_tool_result(tc_id, result)
-            self._llm_client.continue_after_tool()
+            self._tool_calls_pending += 1
+            self._pending_tool_info.append(tool_call)
+            self._update_agent_status()
 
         else:
             logger.warning("Unknown tool call: %s", name)
-            self._pending_responses += 1
             self._llm_client.submit_tool_result(
                 tc_id,
                 f"Tool '{name}' is not available.",
             )
-            self._llm_client.continue_after_tool()
+            self._tool_calls_pending += 1
+            self._pending_tool_info.append(tool_call)
+            self._update_agent_status()
 
     # -----------------------------------------------------------------------
     # Lifecycle
     # -----------------------------------------------------------------------
 
+    def _tk_pump_loop(self) -> None:
+        """Pump the tkinter event loop periodically (~30ms)."""
+        with contextlib.suppress(Exception):
+            self._output_overlay.pump()
+        self._tk_pump_id = _get_root().after(30, self._tk_pump_loop)
+
     def start(self) -> None:
         """Start all runtime components (hotkey listener, tray icon)."""
-        self._tk_timer.start(30)
+        self._tk_pump_id = _get_root().after(30, self._tk_pump_loop)
         if self._hotkey:
             self._hotkey.start()
         if self._tray:
@@ -453,21 +506,20 @@ class ReadScreenApp(QObject):
 
     def stop(self) -> None:
         """Stop all runtime components."""
-        self._tk_timer.stop()
+        if self._tk_pump_id is not None:
+            _get_root().after_cancel(self._tk_pump_id)
+            self._tk_pump_id = None
         if self._hotkey:
             self._hotkey.stop()
         if self._tray:
             self._tray.stop()
-        if self._ocr_thread is not None and self._ocr_thread.isRunning():
-            self._ocr_thread.quit()
-            self._ocr_thread.wait(3000)
         self._llm_client.stop()
         logger.info("ReadScreenApp stopped.")
 
     def _handle_exit(self) -> None:
         """Handle tray exit request."""
         self.stop()
-        QApplication.quit()
+        _get_root().quit()
 
 
 # ---------------------------------------------------------------------------
@@ -478,9 +530,9 @@ class ReadScreenApp(QObject):
 def main() -> None:
     """Application entry point.
 
-    Parses an optional config file path from ``sys.argv``, creates the Qt
-    application, loads configuration, instantiates ``ReadScreenApp``, and
-    enters the Qt event loop.
+    Parses an optional config file path from ``sys.argv``, creates the
+    tkinter root, loads configuration, instantiates ``ReadScreenApp``,
+    and enters the tkinter event loop.
     """
     # Config path from command line or default
     config_path: str | Path = "config.yaml"
@@ -496,15 +548,15 @@ def main() -> None:
     # Load configuration
     config = load_config(config_path)
 
-    # Qt application (must exist before any QWidget)
-    app = QApplication(sys.argv)
-    app.setQuitOnLastWindowClosed(False)
+    # Initialize tkinter root (must come first — OutputOverlay uses it)
+    root = _get_root()
 
     # Create and start the app orchestrator
     screen_app = ReadScreenApp(config)
     screen_app.start()
 
-    sys.exit(app.exec())
+    # Run tkinter event loop
+    root.mainloop()
 
 
 if __name__ == "__main__":

@@ -1,26 +1,23 @@
-"""OCR engine wrapper using PaddleOCR v3.x."""
+"""OCR engine wrapper using EasyOCR."""
 
+import gc
 import logging
-import os
 from typing import Any
 
 import numpy as np
 
-# Disable PaddlePaddle oneDNN at C++ inference level.
-# PaddlePaddle 3.3.0 regression (#77340): PIR executor crashes on oneDNN instruction
-# conversion with pir::ArrayAttribute<pir::DoubleAttribute> in onednn_instruction.cc:118.
-# enable_mkldnn=False on PaddleOCR only sets run_mode="paddle" — PIR executor still
-# compiles oneDNN ops internally. Disabling PIR entirely avoids the crash path.
-os.environ.setdefault("FLAGS_use_mkldnn", "0")
-os.environ.setdefault("FLAGS_enable_pir_in_executor", "0")
-os.environ.setdefault("FLAGS_enable_pir_api", "0")
-os.environ.setdefault("FLAGS_allocator_strategy", "naive_best_fit")
-
 logger = logging.getLogger(__name__)
+
+_LANGUAGE_ALIASES = {
+    "ch": "ch_sim",
+    "cn": "ch_sim",
+    "zh": "ch_sim",
+    "zh-cn": "ch_sim",
+}
 
 
 class OcrEngine:
-    """Lazy-initialized PaddleOCR wrapper for text recognition.
+    """Lazy-initialized EasyOCR wrapper for text recognition.
 
     Accepts numpy arrays (from mss screenshots) and returns extracted text.
     """
@@ -41,14 +38,53 @@ class OcrEngine:
         """Whether the OCR model has been loaded."""
         return self._ocr is not None
 
-    def _ensure_loaded(self):
-        """Load PaddleOCR model if not already loaded."""
-        if self._ocr is None:
-            logger.info(f"Loading PaddleOCR (lang={self._language}, device={self._device})...")
-            from paddleocr import PaddleOCR
+    def _release_reader(self) -> None:
+        """Drop any cached EasyOCR reader before the next capture."""
+        if self._ocr is not None:
+            self._ocr = None
+            gc.collect()
 
-            self._ocr = PaddleOCR(lang=self._language, device=self._device, enable_mkldnn=False)
-            logger.info("PaddleOCR loaded successfully.")
+    def _ensure_loaded(self) -> None:
+        """Load EasyOCR model if not already loaded."""
+        if self._ocr is None:
+            languages = self._easyocr_languages()
+            gpu = self._easyocr_gpu()
+            logger.info("Loading EasyOCR (langs=%s, gpu=%s)...", languages, gpu)
+            import easyocr
+
+            self._ocr = easyocr.Reader(languages, gpu=gpu)
+            logger.info("EasyOCR loaded successfully.")
+
+    def _easyocr_languages(self) -> list[str]:
+        """Convert configured language codes to EasyOCR's language list."""
+        raw_languages = [
+            part.strip().lower()
+            for part in self._language.replace("+", ",").split(",")
+            if part.strip()
+        ]
+        if not raw_languages:
+            raw_languages = ["ch"]
+
+        languages: list[str] = []
+        for raw_language in raw_languages:
+            language = _LANGUAGE_ALIASES.get(raw_language, raw_language)
+            if language not in languages:
+                languages.append(language)
+
+        if "ch_sim" in languages and "en" not in languages:
+            languages.append("en")
+
+        return languages
+
+    def _easyocr_gpu(self) -> bool | str:
+        """Convert configured device to EasyOCR's gpu parameter."""
+        device = self._device.strip()
+        normalized = device.lower()
+        if normalized in {"cpu", "false", "none", "off"}:
+            return False
+        if normalized in {"gpu", "cuda", "true", "on"}:
+            return True
+        return device
 
     def recognize(self, image: np.ndarray) -> str:
         """Recognize text from an image array.
@@ -62,30 +98,30 @@ class OcrEngine:
         """
         self._ensure_loaded()
 
-        # PaddleOCR v3 predict() accepts numpy array directly
-        # Returns list of dicts: [{"rec_text": "...", "rec_score": 0.99, ...}, ...]
-        results = self._ocr.predict(image)
+        results = self._ocr.readtext(image, detail=0)
 
         if not results:
             return ""
 
-        # Extract text from results
-        texts = []
-        for result_set in results:
-            if isinstance(result_set, dict):
-                # Single result: {"rec_text": "...", ...}
-                rec_text = result_set.get("rec_text", "")
-                if rec_text:
-                    texts.append(rec_text)
-            elif isinstance(result_set, list):
-                # List of results (per-line): [{"rec_text": "...", ...}, ...]
-                for item in result_set:
-                    if isinstance(item, dict):
-                        text = item.get("rec_text", "")
-                        if text:
-                            texts.append(text)
+        texts: list[str] = []
+        for result in results:
+            text = self._extract_text(result)
+            if text.strip():
+                texts.append(text)
 
         return "\n".join(texts)
+
+    @staticmethod
+    def _extract_text(result: Any) -> str:
+        """Extract text from EasyOCR result formats."""
+        if isinstance(result, str):
+            return result
+        if isinstance(result, dict):
+            text = result.get("text") or result.get("rec_text") or ""
+            return text if isinstance(text, str) else ""
+        if isinstance(result, (list, tuple)) and len(result) >= 2 and isinstance(result[1], str):
+            return result[1]
+        return ""
 
     def recognize_from_pil(self, image) -> str:
         """Recognize text from a PIL Image.

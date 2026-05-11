@@ -5,12 +5,28 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PIL import Image
 
+from signals import SignalSpy
+
 
 @pytest.fixture
 def tray_manager():
     from tray import TrayManager
 
     return TrayManager(show_icon=True)
+
+
+@pytest.fixture
+def mock_tk_root():
+    """Mock overlay._get_root so safe_emit() fires immediately."""
+    with patch("overlay._get_root") as mock_get_root:
+        mock_root = MagicMock()
+
+        def after_idle_immediate(cb, *args):
+            cb(*args)
+
+        mock_root.after_idle = after_idle_immediate
+        mock_get_root.return_value = mock_root
+        yield mock_root
 
 
 class TestTrayInitialization:
@@ -83,24 +99,28 @@ class TestTrayStartStop:
 
 
 class TestTrayCallbacks:
-    def test_show_callback_emits_signal(self, tray_manager, qtbot):
+    def test_show_callback_emits_signal(self, tray_manager, mock_tk_root):
         """_on_show should emit show_requested signal."""
-        with qtbot.waitSignal(tray_manager.show_requested, timeout=1000):
-            tray_manager._on_show()
+        spy = SignalSpy(tray_manager.show_requested)
+        tray_manager._on_show()
+        assert spy.count() == 1
 
-    def test_hide_callback_emits_signal(self, tray_manager, qtbot):
+    def test_hide_callback_emits_signal(self, tray_manager, mock_tk_root):
         """_on_hide should emit hide_requested signal."""
-        with qtbot.waitSignal(tray_manager.hide_requested, timeout=1000):
-            tray_manager._on_hide()
+        spy = SignalSpy(tray_manager.hide_requested)
+        tray_manager._on_hide()
+        assert spy.count() == 1
 
-    def test_exit_callback_emits_signal(self, tray_manager, qtbot):
+    def test_exit_callback_emits_signal(self, tray_manager, mock_tk_root):
         """_on_exit should emit exit_requested signal and stop."""
         mock_tray = MagicMock()
         tray_manager._tray = mock_tray
         tray_manager._running = True
 
-        with qtbot.waitSignal(tray_manager.exit_requested, timeout=1000):
-            tray_manager._on_exit()
+        spy = SignalSpy(tray_manager.exit_requested)
+        tray_manager._on_exit()
+
+        assert spy.count() == 1
 
         # Verify stop was called
         assert not tray_manager.is_running

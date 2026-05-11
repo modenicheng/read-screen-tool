@@ -3,7 +3,7 @@
 import logging
 from typing import Any
 
-from PySide6.QtCore import QObject, Signal
+from signals import Signal
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ def _create_default_icon():
     return img
 
 
-class TrayManager(QObject):
+class TrayManager:
     """Manages the system tray icon with configurable visibility.
 
     Provides show/hide/exit menu items and signals for Qt main thread integration.
@@ -45,10 +45,6 @@ class TrayManager(QObject):
         tray.exit_requested.connect(app.quit)
         tray.start()
     """
-
-    show_requested = Signal()
-    hide_requested = Signal()
-    exit_requested = Signal()
 
     def __init__(
         self,
@@ -63,7 +59,9 @@ class TrayManager(QObject):
             icon: PIL Image for tray icon (None = use default)
             tooltip: Tooltip text for the tray icon
         """
-        super().__init__()
+        self.show_requested = Signal()
+        self.hide_requested = Signal()
+        self.exit_requested = Signal()
         self._show_icon = show_icon
         self._icon = icon if icon else _create_default_icon()
         self._tooltip = tooltip
@@ -119,15 +117,15 @@ class TrayManager(QObject):
 
     def _on_show(self, icon=None, item=None):
         """Show menu callback."""
-        self.show_requested.emit()
+        self.show_requested.safe_emit()
 
     def _on_hide(self, icon=None, item=None):
         """Hide menu callback."""
-        self.hide_requested.emit()
+        self.hide_requested.safe_emit()
 
     def _on_exit(self, icon=None, item=None):
         """Exit menu callback."""
-        self.exit_requested.emit()
+        self.exit_requested.safe_emit()
         self.stop()
 
     @property

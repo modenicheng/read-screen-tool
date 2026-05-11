@@ -83,7 +83,7 @@ def vision_config() -> AppConfig:
 def mock_lib_imports():
     """Mock all heavy / potentially-missing components.
 
-    Uses plain MagicMock (no autospec) so that Qt Signal attributes
+    Uses plain MagicMock (no autospec) so that Signal attributes
     resolve to MagicMock instances that support ``.connect()``.
     The hotkey module does not exist yet, so we inject a fake module
     into sys.modules.
@@ -93,6 +93,13 @@ def mock_lib_imports():
     fake_hotkey = MagicMock()
     fake_hotkey.HotkeyManager = MagicMock()
 
+    mock_root = MagicMock()
+    mock_root.after = MagicMock(return_value="timer_1")
+    mock_root.after_cancel = MagicMock()
+    mock_root.after_idle = MagicMock(side_effect=lambda cb: cb())
+    mock_root.quit = MagicMock()
+    mock_root.mainloop = MagicMock()
+
     with (
         patch.dict(sys.modules, {"hotkey": fake_hotkey}),
         patch("tray.TrayManager", create=True),
@@ -101,26 +108,34 @@ def mock_lib_imports():
         patch("main.LlmClient"),
         patch("main.OcrEngine"),
         patch("main.ConversationSession"),
+        patch("main._get_root", return_value=mock_root),
     ):
         yield
 
 
 @pytest.fixture
-def orchestrator(qtbot, app_config, mock_lib_imports):
+def orchestrator(app_config, mock_lib_imports):
     """Create a ReadScreenApp with all external components mocked."""
     from main import ReadScreenApp
 
     app = ReadScreenApp(app_config)
-    return app
+    # Replace OCR worker with mock to prevent actual thread spawning in tests
+    if app._ocr_worker is not None:
+        app._ocr_worker = MagicMock()
+    yield app
+    app.stop()
 
 
 @pytest.fixture
-def orchestrator_vision(qtbot, vision_config, mock_lib_imports):
+def orchestrator_vision(vision_config, mock_lib_imports):
     """Create a ReadScreenApp with vision model."""
     from main import ReadScreenApp
 
     app = ReadScreenApp(vision_config)
-    return app
+    if app._ocr_worker is not None:
+        app._ocr_worker = MagicMock()
+    yield app
+    app.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -162,16 +177,19 @@ class TestInitialization:
         assert call_kwargs["model"] == "test-model"
         assert call_kwargs["system_prompt"] == "You are a test assistant."
         assert call_kwargs["session"] is orchestrator._session
-        assert len(call_kwargs["tools"]) == 1
+        assert len(call_kwargs["tools"]) == 3
 
-    def test_llm_client_configured_without_tools(self, qtbot, app_config, mock_lib_imports):
+    def test_llm_client_configured_without_tools(self, app_config, mock_lib_imports):
         """When knowledge is disabled, no tools are configured."""
         from main import ReadScreenApp
 
         app_config.knowledge.enabled = False
         app = ReadScreenApp(app_config)
-        call_kwargs = app._llm_client.configure.call_args[1]
-        assert call_kwargs["tools"] == []
+        try:
+            call_kwargs = app._llm_client.configure.call_args[1]
+            assert call_kwargs["tools"] == []
+        finally:
+            app.stop()
 
     def test_screenshot_overlay_created(self, orchestrator):
         """ScreenshotOverlay is instantiated."""
@@ -186,7 +204,7 @@ class TestInitialization:
         """TrayManager is created."""
         assert orchestrator._tray is not None
 
-    def test_hotkey_import_failure_is_handled(self, qtbot, app_config):
+    def test_hotkey_import_failure_is_handled(self, app_config):
         """When hotkey module is missing, _hotkey is None (no crash)."""
         import sys
 
@@ -202,7 +220,10 @@ class TestInitialization:
             from main import ReadScreenApp
 
             app = ReadScreenApp(app_config)
-            assert app._hotkey is None
+            try:
+                assert app._hotkey is None
+            finally:
+                app.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -239,13 +260,13 @@ class TestSignalWiring:
 
     def test_token_received_connected_to_append_text(self, orchestrator):
         """LlmClient.token_received → OutputOverlay.append_text."""
-        orchestrator._llm_client.token_received.connect.assert_called_with(
+        orchestrator._llm_client.token_received.connect.assert_any_call(
             orchestrator._output_overlay.append_text
         )
 
     def test_response_complete_connected(self, orchestrator):
         """LlmClient.response_complete → _on_response_complete."""
-        orchestrator._llm_client.response_complete.connect.assert_called_with(
+        orchestrator._llm_client.response_complete.connect.assert_any_call(
             orchestrator._on_response_complete
         )
 
@@ -277,7 +298,7 @@ class TestSignalWiring:
         """TrayManager.exit_requested → exit handler."""
         orchestrator._tray.exit_requested.connect.assert_called_with(orchestrator._handle_exit)
 
-    def test_no_crash_when_hotkey_missing(self, qtbot, app_config):
+    def test_no_crash_when_hotkey_missing(self, app_config):
         """Signal wiring does not crash when hotkey is None."""
         import sys
 
@@ -293,10 +314,13 @@ class TestSignalWiring:
             from main import ReadScreenApp
 
             app = ReadScreenApp(app_config)
-            # Should not crash; screenshot_taken wiring still works
-            app._screenshot_overlay.screenshot_taken.connect.assert_called_with(
-                app._queue_screenshot
-            )
+            try:
+                # Should not crash; screenshot_taken wiring still works
+                app._screenshot_overlay.screenshot_taken.connect.assert_called_with(
+                    app._queue_screenshot
+                )
+            finally:
+                app.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +340,9 @@ class TestScreenshotProcessing:
         call_args = orchestrator_vision._llm_client.send.call_args
         assert call_args[0][0]  # prompt non-empty
         assert call_args[1]["image"] is image
+
+        # Status should be "Thinking..." before LLM send
+        orchestrator_vision._output_overlay.set_status.assert_any_call("Thinking...")
 
     def test_non_vision_model_runs_ocr(self, orchestrator):
         """When model lacks vision, OCR runs async, then LLM is called."""
@@ -378,6 +405,8 @@ class TestResponseCompletion:
         """When response is non-empty, add_separator is called."""
         orchestrator._on_response_complete("Here is the answer.")
         orchestrator._output_overlay.add_separator.assert_called_once()
+        # Status should be cleared at response completion
+        orchestrator._output_overlay.clear_status.assert_called()
 
     def test_no_separator_on_empty_response(self, orchestrator):
         """When response is empty/whitespace, no separator is added."""
@@ -400,6 +429,34 @@ class TestResponseCompletion:
 
         orchestrator._session.compress.assert_not_called()
 
+    def test_batch_tool_calls_fires_continue_after_tool(self, orchestrator):
+        """When _tool_calls_pending > 0, continue_after_tool is called once."""
+        orchestrator._tool_calls_pending = 3  # simulate 3 batched tool calls
+        orchestrator._pending_responses = 1
+
+        orchestrator._on_response_complete("")
+
+        # Batch continuation: _pending_responses incremented, tool_calls reset
+        assert orchestrator._tool_calls_pending == 0
+        assert orchestrator._pending_responses == 1  # 1 + 1 - 1 = 1
+        orchestrator._llm_client.continue_after_tool.assert_called_once()
+        # After continue_after_tool, status should show "Thinking..."
+        orchestrator._output_overlay.set_status.assert_any_call("Thinking...")
+        # Status should have been cleared before
+        orchestrator._output_overlay.clear_status.assert_called()
+
+    def test_no_batch_when_no_tool_calls(self, orchestrator):
+        """When _tool_calls_pending == 0, continue_after_tool is NOT called."""
+        orchestrator._tool_calls_pending = 0
+        orchestrator._pending_responses = 1
+
+        orchestrator._on_response_complete("")
+
+        assert orchestrator._tool_calls_pending == 0
+        orchestrator._llm_client.continue_after_tool.assert_not_called()
+        # Status should be cleared
+        orchestrator._output_overlay.clear_status.assert_called()
+
 
 # ---------------------------------------------------------------------------
 # 5. LLM Error Handling
@@ -415,6 +472,8 @@ class TestErrorHandling:
 
         orchestrator._output_overlay.append_text.assert_called_with("[Error: Connection timeout]")
         orchestrator._output_overlay.add_separator.assert_called_once()
+        # Status should be cleared on error
+        orchestrator._output_overlay.clear_status.assert_called()
 
     def test_error_with_empty_message(self, orchestrator):
         """Error with empty message still displayed."""
@@ -428,7 +487,12 @@ class TestErrorHandling:
 
 
 class TestToolCalling:
-    """Tests for _on_tool_call_requested and tool dispatch."""
+    """Tests for _on_tool_call_requested and tool dispatch.
+
+Tool results are submitted to the session immediately, but
+``continue_after_tool`` is deferred to ``_on_response_complete``
+so that all results from a single LLM response are batched.
+"""
 
     def test_grep_knowledge_tool_dispatched(self, orchestrator):
         """When LLM requests grep_knowledge, it is executed and result submitted."""
@@ -450,7 +514,9 @@ class TestToolCalling:
         orchestrator._llm_client.submit_tool_result.assert_called_once_with(
             "call_abc", "Found: test line"
         )
-        orchestrator._llm_client.continue_after_tool.assert_called_once()
+        # continue_after_tool is NOT called here — deferred to _on_response_complete
+        orchestrator._llm_client.continue_after_tool.assert_not_called()
+        assert orchestrator._tool_calls_pending == 1
 
     def test_grep_knowledge_default_args(self, orchestrator):
         """When grep args are missing, defaults are used."""
@@ -472,7 +538,8 @@ class TestToolCalling:
         orchestrator._llm_client.submit_tool_result.assert_called_once_with(
             "call_def", "No matches found."
         )
-        orchestrator._llm_client.continue_after_tool.assert_called_once()
+        orchestrator._llm_client.continue_after_tool.assert_not_called()
+        assert orchestrator._tool_calls_pending == 1
 
     def test_unknown_tool_returns_error_result(self, orchestrator):
         """Unknown tool calls return an error string as result."""
@@ -487,7 +554,8 @@ class TestToolCalling:
         orchestrator._llm_client.submit_tool_result.assert_called_once_with(
             "call_unk", "Tool 'unknown_tool' is not available."
         )
-        orchestrator._llm_client.continue_after_tool.assert_called_once()
+        orchestrator._llm_client.continue_after_tool.assert_not_called()
+        assert orchestrator._tool_calls_pending == 1
 
     def test_tool_call_with_string_max_results(self, orchestrator):
         """String-type max_results is coerced to int."""
@@ -506,6 +574,100 @@ class TestToolCalling:
             context_lines=2,
             knowledge_dir="knowledge",
         )
+
+
+# ---------------------------------------------------------------------------
+# 6b. Agent Status Display
+# ---------------------------------------------------------------------------
+
+
+class TestAgentStatus:
+    """Tests for agent status display in the overlay."""
+
+    def test_show_thinking_on_queue(self, orchestrator_vision):
+        """_queue_screenshot sets status to 'Thinking...'."""
+        image = np.zeros((100, 100, 3), dtype=np.uint8)
+        orchestrator_vision._queue_screenshot(image)
+        orchestrator_vision._output_overlay.set_status.assert_any_call("Thinking...")
+
+    def test_grep_tool_updates_status(self, orchestrator):
+        """grep_knowledge tool call updates status with search keyword."""
+        tool_call = {
+            "id": "call_abc",
+            "name": "grep_knowledge",
+            "arguments": {"pattern": "config"},
+        }
+        with patch("main.grep_knowledge", return_value="found"):
+            orchestrator._on_tool_call_requested(tool_call)
+        orchestrator._output_overlay.set_status.assert_any_call("搜索config...")
+
+    def test_multiple_grep_shows_keywords(self, orchestrator):
+        """Multiple grep calls show joined keywords."""
+        with patch("main.grep_knowledge", return_value="found"):
+            orchestrator._on_tool_call_requested({
+                "id": "c1", "name": "grep_knowledge",
+                "arguments": {"pattern": "auth"},
+            })
+            orchestrator._on_tool_call_requested({
+                "id": "c2", "name": "grep_knowledge",
+                "arguments": {"pattern": "login"},
+            })
+        # Last call should show both keywords
+        orchestrator._output_overlay.set_status.assert_called_with("搜索auth|login...")
+
+    def test_long_keywords_shows_count(self, orchestrator):
+        """Long combined keywords show count instead."""
+        with patch("main.grep_knowledge", return_value="found"):
+            long1 = "very_long_pattern_" + "x" * 35
+            long2 = "another_long_pattern_" + "y" * 35
+            orchestrator._on_tool_call_requested({
+                "id": "c1", "name": "grep_knowledge",
+                "arguments": {"pattern": long1},
+            })
+            orchestrator._on_tool_call_requested({
+                "id": "c2", "name": "grep_knowledge",
+                "arguments": {"pattern": long2},
+            })
+        # Combined length > 40, should show count
+        orchestrator._output_overlay.set_status.assert_called_with("搜索2个关键词中...")
+
+    def test_non_grep_tool_shows_name(self, orchestrator):
+        """Non-grep tools show just the tool name."""
+        tool_call = {
+            "id": "call_rf",
+            "name": "read_file",
+            "arguments": {"file_path": "test.txt"},
+        }
+        with patch("main.read_file", return_value="content"):
+            orchestrator._on_tool_call_requested(tool_call)
+        orchestrator._output_overlay.set_status.assert_any_call("read_file")
+
+    def test_mixed_tools_show_both(self, orchestrator):
+        """Mixed grep + other tools show both search and tool name."""
+        with patch("main.grep_knowledge", return_value="found"):
+            orchestrator._on_tool_call_requested({
+                "id": "c1", "name": "grep_knowledge",
+                "arguments": {"pattern": "config"},
+            })
+        with patch("main.read_file", return_value="content"):
+            orchestrator._on_tool_call_requested({
+                "id": "c2", "name": "read_file",
+                "arguments": {"file_path": "test.txt"},
+            })
+        # Last call should show both
+        orchestrator._output_overlay.set_status.assert_called_with("搜索config... | read_file")
+
+    def test_status_cleared_on_response_complete(self, orchestrator):
+        """_on_response_complete clears the agent status."""
+        orchestrator._output_overlay.set_status("搜索test...")
+        orchestrator._on_response_complete("Done.")
+        orchestrator._output_overlay.clear_status.assert_called()
+
+    def test_status_cleared_on_error(self, orchestrator):
+        """_on_llm_error clears the agent status."""
+        orchestrator._output_overlay.set_status("Thinking...")
+        orchestrator._on_llm_error("Boom")
+        orchestrator._output_overlay.clear_status.assert_called()
 
 
 # ---------------------------------------------------------------------------
@@ -529,7 +691,7 @@ class TestLifecycle:
         orchestrator._tray.stop.assert_called_once()
         orchestrator._llm_client.stop.assert_called_once()
 
-    def test_start_without_hotkey(self, qtbot, app_config):
+    def test_start_without_hotkey(self, app_config):
         """start() does not crash when hotkey is None."""
         import sys
 
@@ -545,9 +707,12 @@ class TestLifecycle:
             from main import ReadScreenApp
 
             app = ReadScreenApp(app_config)
-            app.start()  # Should not raise
+            try:
+                app.start()  # Should not raise
+            finally:
+                app.stop()
 
-    def test_stop_without_hotkey(self, qtbot, app_config):
+    def test_stop_without_hotkey(self, app_config):
         """stop() does not crash when hotkey is None."""
         import sys
 
@@ -574,16 +739,14 @@ class TestLifecycle:
 class TestMainFunction:
     """Tests for the main() entry point."""
 
-    def test_main_loads_config_and_starts(self, qtbot, sample_config_path):
-        """main() loads config from file, creates QApp, starts app."""
+    def test_main_loads_config_and_starts(self, sample_config_path):
+        """main() loads config from file, creates tk root, starts app."""
         with (
-            patch("main.QApplication") as mock_qapp_cls,
+            patch("main._get_root") as mock_get_root,
             patch("main.ReadScreenApp") as mock_app_cls,
-            patch("main.sys.exit") as mock_exit,
         ):
-            mock_qapp = MagicMock()
-            mock_qapp.exec.return_value = 0
-            mock_qapp_cls.return_value = mock_qapp
+            mock_root = MagicMock()
+            mock_get_root.return_value = mock_root
 
             mock_app = MagicMock()
             mock_app_cls.return_value = mock_app
@@ -593,26 +756,22 @@ class TestMainFunction:
 
                 main()
 
-            mock_qapp_cls.assert_called_once()
-            mock_qapp.setQuitOnLastWindowClosed.assert_called_with(False)
+            mock_get_root.assert_called_once()
             mock_app_cls.assert_called_once()
             config_arg = mock_app_cls.call_args[0][0]
             assert config_arg.default_model == "deepseek-v4-pro"
             mock_app.start.assert_called_once()
-            mock_qapp.exec.assert_called_once()
-            mock_exit.assert_called_once_with(0)
+            mock_root.mainloop.assert_called_once()
 
-    def test_main_default_config_path(self, qtbot):
+    def test_main_default_config_path(self):
         """main() uses 'config.yaml' when no argv provided."""
         with (
             patch("main.load_config") as mock_load,
-            patch("main.QApplication") as mock_qapp_cls,
+            patch("main._get_root") as mock_get_root,
             patch("main.ReadScreenApp") as mock_app_cls,
-            patch("main.sys.exit"),
         ):
-            mock_qapp = MagicMock()
-            mock_qapp.exec.return_value = 0
-            mock_qapp_cls.return_value = mock_qapp
+            mock_root = MagicMock()
+            mock_get_root.return_value = mock_root
             mock_app = MagicMock()
             mock_app_cls.return_value = mock_app
 
@@ -623,16 +782,14 @@ class TestMainFunction:
 
             mock_load.assert_called_once_with("config.yaml")
 
-    def test_main_custom_config_path(self, qtbot, sample_config_path):
+    def test_main_custom_config_path(self, sample_config_path):
         """main() uses the config path provided in sys.argv[1]."""
         with (
-            patch("main.QApplication") as mock_qapp_cls,
+            patch("main._get_root") as mock_get_root,
             patch("main.ReadScreenApp") as mock_app_cls,
-            patch("main.sys.exit"),
         ):
-            mock_qapp = MagicMock()
-            mock_qapp.exec.return_value = 0
-            mock_qapp_cls.return_value = mock_qapp
+            mock_root = MagicMock()
+            mock_get_root.return_value = mock_root
             mock_app = MagicMock()
             mock_app_cls.return_value = mock_app
 
@@ -642,15 +799,13 @@ class TestMainFunction:
 
                 main()
 
-            mock_qapp_cls.assert_called_once()
-            mock_qapp.setQuitOnLastWindowClosed.assert_called_with(False)
-
+            mock_get_root.assert_called_once()
             mock_app_cls.assert_called_once()
             config_arg = mock_app_cls.call_args[0][0]
             assert config_arg.default_model == "deepseek-v4-pro"
 
             mock_app.start.assert_called_once()
-            mock_qapp.exec.assert_called_once()
+            mock_root.mainloop.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -694,7 +849,8 @@ class TestIntegrationScenarios:
             orchestrator._on_tool_call_requested(tool_call)
 
         assert orchestrator._llm_client.submit_tool_result.called
-        assert orchestrator._llm_client.continue_after_tool.called
+        # continue_after_tool is deferred to _on_response_complete
+        assert not orchestrator._llm_client.continue_after_tool.called
 
     def test_response_triggers_compression(self, orchestrator):
         """When at 70% threshold, compression is forced after response."""

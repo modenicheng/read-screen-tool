@@ -8,7 +8,6 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
-from PySide6.QtCore import QCoreApplication
 
 from llm import LlmClient
 
@@ -105,13 +104,13 @@ class MockSession:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def qapp():
-    """Ensure a QCoreApplication exists for Qt signal testing."""
-    app = QCoreApplication.instance()
-    if app is None:
-        app = QCoreApplication([])
-    yield app
+@pytest.fixture(autouse=True)
+def mock_safe_emit():
+    """Patch _get_root so safe_emit works synchronously in tests (no tkinter)."""
+    mock_root = MagicMock()
+    mock_root.after_idle = lambda fn: fn()
+    with patch("overlay._get_root", return_value=mock_root):
+        yield
 
 
 @pytest.fixture
@@ -125,13 +124,15 @@ def provider_dict():
 
 
 @pytest.fixture
-def client(qapp, provider_dict):
+def client(provider_dict):
     """Create a LlmClient with dict-based config."""
-    return LlmClient(provider_config=provider_dict)
+    c = LlmClient(provider_config=provider_dict)
+    yield c
+    c.stop()
 
 
 @pytest.fixture
-def configured_client(qapp, provider_dict):
+def configured_client(provider_dict):
     """Create and configure a LlmClient for use."""
     c = LlmClient(provider_config=provider_dict)
     c.configure(
@@ -139,7 +140,8 @@ def configured_client(qapp, provider_dict):
         system_prompt="Test system prompt",
         model="deepseek-v4-pro",
     )
-    return c
+    yield c
+    c.stop()
 
 
 @pytest.fixture
@@ -1209,7 +1211,7 @@ class TestEdgeCases:
         # Verify persistent worker infrastructure was created
         assert client._request_worker is not None
         assert client._request_thread is not None
-        assert client._request_thread.isRunning()
+        assert client._request_thread.is_alive()
 
         # send() should not crash — it dispatches via signal to worker thread
         client.send("Hello")
@@ -1218,7 +1220,7 @@ class TestEdgeCases:
         thread = client._request_thread
         client.stop()
         assert thread is not None
-        assert not thread.isRunning()
+        assert not thread.is_alive()
 
     def test_configure_with_provider_config_dataclass(self, client, mock_openai):
         """configure() accepts a dataclass-like object with .api_key and .base_url."""
@@ -1275,7 +1277,7 @@ class TestEdgeCases:
         assert len(signals) == 1
         assert signals[0] == ("call_xyz", "result data")
 
-    def test_none_config_no_explosion(self, qapp):
+    def test_none_config_no_explosion(self):
         """Creating a client with None config should not explode."""
         c = LlmClient(provider_config=None)
         assert c._provider is None
