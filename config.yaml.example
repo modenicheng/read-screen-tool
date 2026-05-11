@@ -1,9 +1,9 @@
 provider:
   - name: deepseek
-    api_key: "your_deepseek_api_key_here"
+    api_key: "sk-..."
     base_url: "https://api.deepseek.com"
   - name: dashscope
-    api_key: "your_dashscope_api_key_here"
+    api_key: "sk-..."
     base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 models:
@@ -11,35 +11,44 @@ models:
     provider: deepseek
     context: 1048576
     vision: false
-  - name: deepseek-v4-flash
-    provider: deepseek
-    context: 65536
-    vision: false
+  - name: qwen3.6-plus
+    provider: dashscope
+    context: 1048576
+    vision: true
+  - name: qwen3.6-flash
+    provider: dashscope
+    context: 1048576
+    vision: true
 
-system_prompt: "You are a helpful assistant. Answer based on the provided content."
+system_prompt:
+  You are a helpful assistant. Answer based on the provided content. If the content is insufficient, say you don't know.
+  Always be concise. Use Chinese to answer.
+
+# default_model: "qwen3.6-plus"
+# default_model: "qwen3.6-flash"
 default_model: "deepseek-v4-pro"
 
 ocr:
   language: "ch"
-  device: "cpu"
+  device: "gpu"
 
 hotkeys:
-  screenshot: "ctrl+shift+left"
+  screenshot: "ctrl+alt+left"
   toggle_overlay: "ctrl+alt+a"
-  move_overlay: "ctrl+shift+right"
+  move_overlay: "ctrl+alt+right"
 
 output_window:
   position:
     x: 100
     y: 100
   size:
-    width: 600
-    height: 400
+    width: 400
+    height: 600
   font:
     family: "Microsoft YaHei"
-    size: 14
+    size: 12
     color: "#FFFFFF"
-  shadow: true
+  shadow: false
 
 systray:
   show_icon: true
@@ -47,4 +56,3 @@ systray:
 knowledge:
   enabled: true
   directory: "knowledge"
-  memory_directory: "memory"

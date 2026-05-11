@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest tests/test_hotkey.py tests/test_config.py -v)",
+      "Bash(.venv/Scripts/python -m pytest tests/test_hotkey.py tests/test_config.py -v)"
+    ]
+  }
+}
