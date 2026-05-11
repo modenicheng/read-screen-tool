@@ -269,22 +269,37 @@ class OutputOverlay:
     # -----------------------------------------------------------------------
 
     def append_text(self, text: str) -> None:
-        """Append text to the output buffer and schedule a markdown re-render.
+        """Append text with immediate display and debounced markdown re-render.
 
-        Streaming-friendly: accumulates into the last text block, then
-        re-renders after a 150 ms debounce to avoid flickering during
-        rapid token-by-token delivery.
+        The raw text chunk is inserted into the widget *immediately* so
+        the user sees real-time streaming output.  A 150 ms debounce
+        then re-renders the full content with markdown formatting once
+        the stream pauses.
         """
         if not self._text_blocks:
             self._text_blocks = [""]
         self._text_blocks[-1] += text
 
+        # Immediate raw-text insert for real-time feedback
+        self._text_widget.config(state=tk.NORMAL)
+        self._text_widget.insert(tk.END, text)
+        self._text_widget.see(tk.END)
+        self._text_widget.config(state=tk.DISABLED)
+
+        # Schedule debounced markdown re-render
         self._schedule_render()
         self.text_added.emit(text)
 
     def add_separator(self) -> None:
-        """Start a new text block (separator rendered between blocks)."""
+        """Start a new text block with an immediate separator line."""
         self._text_blocks.append("")
+
+        # Immediate separator line
+        self._text_widget.config(state=tk.NORMAL)
+        self._text_widget.insert(tk.END, "\n" + "─" * 40 + "\n\n")
+        self._text_widget.see(tk.END)
+        self._text_widget.config(state=tk.DISABLED)
+
         self._schedule_render()
 
     def clear(self) -> None:
