@@ -15,6 +15,9 @@ from pathlib import Path
 _STRUCTURED_EXTENSIONS = {".md", ".tex"}
 _TEXT_EXTENSIONS = {".txt"}
 _ALL_EXTENSIONS = _STRUCTURED_EXTENSIONS | _TEXT_EXTENSIONS
+_REGEX_META_CHARS = set(".^$*+?{}[]\\|()")
+_DEFAULT_READ_MAX_CHARS = 12_000
+_MAX_READ_MAX_CHARS = 50_000
 
 
 def _validate_path(file_path: str, allowed_dirs: list[Path]) -> Path | None:
@@ -51,6 +54,44 @@ def _validate_path(file_path: str, allowed_dirs: list[Path]) -> Path | None:
         return valid_candidate  # None if path traversal detected
     except (OSError, ValueError):
         return None
+
+
+def _coerce_int(value: object, default: int, min_value: int, max_value: int) -> int:
+    """Coerce tool-provided numbers into a bounded integer."""
+    try:
+        number = int(value) if value is not None else default
+    except (TypeError, ValueError):
+        number = default
+    return max(min_value, min(number, max_value))
+
+
+def _compile_regex(pattern: str) -> re.Pattern[str] | None:
+    """Compile regex-like patterns, falling back to substring search on errors."""
+    if not pattern or not any(ch in _REGEX_META_CHARS for ch in pattern):
+        return None
+    try:
+        return re.compile(pattern, re.IGNORECASE)
+    except re.error:
+        return None
+
+
+def _line_matches(line: str, pattern_lower: str, regex: re.Pattern[str] | None) -> bool:
+    """Return whether a line matches a substring or regex pattern."""
+    if regex is not None:
+        return regex.search(line) is not None
+    return pattern_lower in line.lower()
+
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    """Trim large tool results and tell the model how to narrow the read."""
+    if len(text) <= max_chars:
+        return text
+    return (
+        text[:max_chars].rstrip()
+        + "\n\n[Result truncated to "
+        + f"{max_chars} characters from {len(text)}. "
+        + "Use read_file with query/start_line/end_line/max_chars for a narrower excerpt.]"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +204,7 @@ def _parse_tex_sections(lines: list[str]) -> list[tuple[str, list[str]]]:
 def _search_structured_file(
     file_path: Path,
     pattern_lower: str,
+    regex: re.Pattern[str] | None,
     max_results: int,
 ) -> list[str]:
     """Search a structured file (md/tex) and return matching sections.
@@ -202,7 +244,7 @@ def _search_structured_file(
         # Check if any line in this section matches
         all_lines = [heading] + body if heading else body
         for line in all_lines:
-            if pattern_lower in line.lower():
+            if _line_matches(line, pattern_lower, regex):
                 if idx not in seen_sections:
                     seen_sections.add(idx)
                     # Format the section
@@ -221,6 +263,7 @@ def _search_structured_file(
 def _search_text_file(
     file_path: Path,
     pattern_lower: str,
+    regex: re.Pattern[str] | None,
     max_results: int,
     context_lines: int,
 ) -> list[str]:
@@ -245,7 +288,7 @@ def _search_text_file(
         if len(results) >= max_results:
             break
 
-        if pattern_lower in line.lower():
+        if _line_matches(line, pattern_lower, regex):
             start = max(0, i - context_lines)
             end = min(len(lines), i + context_lines + 1)
 
@@ -255,11 +298,7 @@ def _search_text_file(
             before_str = "\n".join(context_before)
             after_str = "\n".join(context_after)
             block = (
-                f"File: {file_path.name}, Line {i + 1}:\n"
-                f"{before_str}\n"
-                f">>> {line}\n"
-                f"{after_str}\n"
-                f"---"
+                f"File: {file_path.name}, Line {i + 1}:\n{before_str}\n>>> {line}\n{after_str}\n---"
             )
             results.append(block)
 
@@ -303,6 +342,7 @@ def grep_knowledge(
         return "No matches found."
 
     pattern_lower = pattern.lower()
+    regex = _compile_regex(pattern)
     results: list[str] = []
 
     # Process structured files first (md, tex), then text files
@@ -312,14 +352,16 @@ def grep_knowledge(
     for file_path in structured_files:
         if len(results) >= max_results:
             break
-        file_results = _search_structured_file(file_path, pattern_lower, max_results - len(results))
+        file_results = _search_structured_file(
+            file_path, pattern_lower, regex, max_results - len(results)
+        )
         results.extend(file_results)
 
     for file_path in text_files:
         if len(results) >= max_results:
             break
         file_results = _search_text_file(
-            file_path, pattern_lower, max_results - len(results), context_lines
+            file_path, pattern_lower, regex, max_results - len(results), context_lines
         )
         results.extend(file_results)
 
@@ -341,6 +383,7 @@ def get_grep_tool_definition() -> dict:
             "name": "grep_knowledge",
             "description": (
                 "Search files in the knowledge base. "
+                "The pattern can be plain text or a Python-style regular expression. "
                 "For .md and .tex files, returns the entire section containing the match. "
                 "For .txt files, returns matching lines with surrounding context."
             ),
@@ -377,6 +420,11 @@ def get_grep_tool_definition() -> dict:
 def read_file(
     file_path: str,
     allowed_dirs: list[str] | None = None,
+    query: str | None = None,
+    context_lines: int = 20,
+    start_line: int | None = None,
+    end_line: int | None = None,
+    max_chars: int = _DEFAULT_READ_MAX_CHARS,
 ) -> str:
     """Read a file from one of the allowed directories.
 
@@ -384,6 +432,12 @@ def read_file(
         file_path: Relative path to the file (e.g. "notes/todo.txt").
         allowed_dirs: List of allowed directory paths as strings.
             Defaults to ["knowledge", "memory"].
+        query: Optional substring or regex. When provided, only matching excerpts
+            are returned.
+        context_lines: Number of lines around query matches.
+        start_line: Optional 1-based inclusive start line for range reads.
+        end_line: Optional 1-based inclusive end line for range reads.
+        max_chars: Maximum characters returned to the LLM.
 
     Returns:
         The file contents as a string, or an error message.
@@ -405,11 +459,46 @@ def read_file(
 
     try:
         content = resolved.read_text(encoding="utf-8")
-        return content
     except UnicodeDecodeError:
         return f"Error: File '{file_path}' is not a valid text file (UTF-8 decode failed)."
     except OSError as e:
         return f"Error reading file '{file_path}': {e}"
+
+    max_chars = _coerce_int(max_chars, _DEFAULT_READ_MAX_CHARS, 200, _MAX_READ_MAX_CHARS)
+    context_lines = _coerce_int(context_lines, 20, 0, 100)
+
+    lines = content.splitlines()
+    if query:
+        pattern_lower = query.lower()
+        regex = _compile_regex(query)
+        blocks: list[str] = []
+        for i, line in enumerate(lines):
+            if not _line_matches(line, pattern_lower, regex):
+                continue
+
+            start = max(0, i - context_lines)
+            end = min(len(lines), i + context_lines + 1)
+            before = "\n".join(lines[start:i])
+            after = "\n".join(lines[i + 1 : end])
+            block = f"File: {resolved.name}, Line {i + 1}:\n{before}\n>>> {line}\n{after}\n---"
+            blocks.append(block)
+            if len("\n".join(blocks)) >= max_chars:
+                break
+
+        if not blocks:
+            return f"No matches found in file: {file_path}"
+        return _truncate_text("\n".join(blocks), max_chars)
+
+    if start_line is not None or end_line is not None:
+        start = _coerce_int(start_line, 1, 1, max(1, len(lines)))
+        end = _coerce_int(end_line, len(lines), 1, max(1, len(lines)))
+        if end < start:
+            return f"Error: end_line ({end}) is before start_line ({start})."
+        excerpt = "\n".join(lines[start - 1 : end])
+        header = f"File: {resolved.name}, Lines {start}-{end}\n"
+        return _truncate_text(header + excerpt, max_chars)
+
+    return _truncate_text(content, max_chars)
 
 
 def write_file(
@@ -457,7 +546,9 @@ def get_read_file_tool_definition() -> dict:
         "function": {
             "name": "read_file",
             "description": (
-                "Read the contents of a text file. "
+                "Read a bounded excerpt from a text file. "
+                "Use query for targeted matches, or start_line/end_line for a range. "
+                "Large reads are truncated by max_chars. "
                 "Only files in the knowledge/ or memory/ directories are accessible."
             ),
             "parameters": {
@@ -468,6 +559,33 @@ def get_read_file_tool_definition() -> dict:
                         "description": (
                             "Relative path to the file, e.g. 'notes/todo.txt'. "
                             "Must be within knowledge/ or memory/."
+                        ),
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "Optional plain text or regex to find inside the file. "
+                            "When set, returns matching excerpts instead of the whole file."
+                        ),
+                    },
+                    "context_lines": {
+                        "type": "integer",
+                        "description": (
+                            "Lines of context around query matches (default: 20, max: 100)."
+                        ),
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "description": "Optional 1-based inclusive start line for range reads.",
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "description": "Optional 1-based inclusive end line for range reads.",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "description": (
+                            "Maximum characters to return (default: 12000, max: 50000)."
                         ),
                     },
                 },

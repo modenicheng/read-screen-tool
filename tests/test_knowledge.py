@@ -163,6 +163,17 @@ class TestGrepKnowledge:
         assert result.count(">>>") >= 1
         assert "File: animals.txt" in result
 
+    def test_grep_supports_regex_alternatives(self, temp_knowledge_dir: Path) -> None:
+        """Regex-style patterns from LLM tool calls should work."""
+        result = grep_knowledge(
+            "quick.*fox|slow.*quick",
+            knowledge_dir=str(temp_knowledge_dir),
+        )
+
+        assert "No matches found." not in result
+        assert "quick brown fox" in result.lower()
+        assert "SLOW TURTLES ARE NOT QUICK" in result
+
 
 class TestGrepMarkdownSections:
     """Tests for markdown section-based search."""
@@ -376,6 +387,39 @@ class TestReadFile:
         result = read_file("any_file.txt")
         assert "Error" in result
 
+    def test_large_read_is_truncated_by_default(self, temp_dirs: tuple[Path, Path]) -> None:
+        """Large files should not be returned in full by a tool call."""
+        knowledge, memory = temp_dirs
+        large_text = "".join(f"line {i}: filler text\n" for i in range(2000))
+        (knowledge / "large.txt").write_text(large_text, encoding="utf-8")
+
+        result = read_file("large.txt", allowed_dirs=[str(knowledge), str(memory)])
+
+        assert len(result) < len(large_text)
+        assert "truncated" in result.lower()
+        assert "max_chars" in result
+
+    def test_read_query_returns_matching_excerpt(self, temp_dirs: tuple[Path, Path]) -> None:
+        """read_file can return a targeted excerpt around a query."""
+        knowledge, memory = temp_dirs
+        (knowledge / "book.txt").write_text(
+            "alpha\nbefore\nneedle answer\nafter\nomega\n",
+            encoding="utf-8",
+        )
+
+        result = read_file(
+            "book.txt",
+            allowed_dirs=[str(knowledge), str(memory)],
+            query="needle",
+            context_lines=1,
+        )
+
+        assert "before" in result
+        assert "needle answer" in result
+        assert "after" in result
+        assert "alpha" not in result
+        assert "omega" not in result
+
 
 class TestWriteFile:
     """Tests for write_file()."""
@@ -430,7 +474,12 @@ class TestGetReadFileToolDefinition:
         definition = get_read_file_tool_definition()
         assert definition["type"] == "function"
         assert definition["function"]["name"] == "read_file"
-        assert "file_path" in definition["function"]["parameters"]["properties"]
+        props = definition["function"]["parameters"]["properties"]
+        assert "file_path" in props
+        assert "query" in props
+        assert "start_line" in props
+        assert "end_line" in props
+        assert "max_chars" in props
         assert "file_path" in definition["function"]["parameters"]["required"]
 
 
