@@ -10,3 +10,7 @@ wheels/
 .venv
 
 config.yaml
+
+*.log
+
+.tmp
