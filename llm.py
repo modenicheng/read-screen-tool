@@ -337,19 +337,16 @@ class LlmClient:
                         }
                         tool_calls.append(tool_call)
 
-                        # Emit signal for each tool call
-                        self.tool_call_requested.safe_emit(
-                            {
-                                "id": buf["id"],
-                                "name": buf["name"],
-                                "arguments": args,
-                            }
-                        )
-
                 if tool_calls:
                     assistant_message["tool_calls"] = tool_calls
 
-            # Store assistant response in session
+            # Store assistant response in session BEFORE emitting tool_call_requested.
+            # safe_emit() schedules callbacks on the tkinter main thread immediately,
+            # so _on_tool_call_requested() may run and add tool messages before we
+            # return to the caller.  The assistant message (with tool_calls) must be
+            # in the session first, otherwise the API rejects with:
+            #   "Messages with role 'tool' must be a response to a preceding
+            #    message with 'tool_calls'"
             if accumulated_content:
                 assistant_message["content"] = accumulated_content
 
@@ -363,6 +360,24 @@ class LlmClient:
                     tool_calls=assistant_message.get("tool_calls"),
                     reasoning_content=assistant_message.get("reasoning_content"),
                 )
+
+            # Now emit tool call signals — session already has the assistant message.
+            if tool_call_buffers:
+                for idx in sorted(tool_call_buffers.keys()):
+                    buf = tool_call_buffers[idx]
+                    if buf["name"]:
+                        try:
+                            args = json.loads(buf["arguments"]) if buf["arguments"] else {}
+                        except json.JSONDecodeError:
+                            args = {}
+
+                        self.tool_call_requested.safe_emit(
+                            {
+                                "id": buf["id"],
+                                "name": buf["name"],
+                                "arguments": args,
+                            }
+                        )
 
             # Emit completion signal
             self.response_complete.safe_emit(accumulated_content)
