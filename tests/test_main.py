@@ -491,10 +491,10 @@ class TestErrorHandling:
 class TestToolCalling:
     """Tests for _on_tool_call_requested and tool dispatch.
 
-Tool results are submitted to the session immediately, but
-``continue_after_tool`` is deferred to ``_on_response_complete``
-so that all results from a single LLM response are batched.
-"""
+    Tool results are submitted to the session immediately, but
+    ``continue_after_tool`` is deferred to ``_on_response_complete``
+    so that all results from a single LLM response are batched.
+    """
 
     def test_grep_knowledge_tool_dispatched(self, orchestrator):
         """When LLM requests grep_knowledge, it is executed and result submitted."""
@@ -577,6 +577,35 @@ so that all results from a single LLM response are batched.
             knowledge_dir="knowledge",
         )
 
+    def test_read_file_forwards_targeted_read_args(self, orchestrator):
+        """read_file tool calls can request a bounded targeted excerpt."""
+        tool_call = {
+            "id": "call_read",
+            "name": "read_file",
+            "arguments": {
+                "file_path": "book.txt",
+                "query": "needle",
+                "context_lines": "3",
+                "start_line": "10",
+                "end_line": "20",
+                "max_chars": "4096",
+            },
+        }
+
+        with patch("main.read_file", return_value="excerpt") as mock_read:
+            orchestrator._on_tool_call_requested(tool_call)
+
+        mock_read.assert_called_once_with(
+            file_path="book.txt",
+            allowed_dirs=["knowledge", "memory"],
+            query="needle",
+            context_lines=3,
+            start_line=10,
+            end_line=20,
+            max_chars=4096,
+        )
+        orchestrator._llm_client.submit_tool_result.assert_called_once_with("call_read", "excerpt")
+
 
 # ---------------------------------------------------------------------------
 # 6b. Agent Status Display
@@ -606,14 +635,20 @@ class TestAgentStatus:
     def test_multiple_grep_shows_keywords(self, orchestrator):
         """Multiple grep calls show joined keywords."""
         with patch("main.grep_knowledge", return_value="found"):
-            orchestrator._on_tool_call_requested({
-                "id": "c1", "name": "grep_knowledge",
-                "arguments": {"pattern": "auth"},
-            })
-            orchestrator._on_tool_call_requested({
-                "id": "c2", "name": "grep_knowledge",
-                "arguments": {"pattern": "login"},
-            })
+            orchestrator._on_tool_call_requested(
+                {
+                    "id": "c1",
+                    "name": "grep_knowledge",
+                    "arguments": {"pattern": "auth"},
+                }
+            )
+            orchestrator._on_tool_call_requested(
+                {
+                    "id": "c2",
+                    "name": "grep_knowledge",
+                    "arguments": {"pattern": "login"},
+                }
+            )
         # Last call should show both keywords
         orchestrator._output_overlay.set_status.assert_called_with("搜索auth|login...")
 
@@ -622,14 +657,20 @@ class TestAgentStatus:
         with patch("main.grep_knowledge", return_value="found"):
             long1 = "very_long_pattern_" + "x" * 35
             long2 = "another_long_pattern_" + "y" * 35
-            orchestrator._on_tool_call_requested({
-                "id": "c1", "name": "grep_knowledge",
-                "arguments": {"pattern": long1},
-            })
-            orchestrator._on_tool_call_requested({
-                "id": "c2", "name": "grep_knowledge",
-                "arguments": {"pattern": long2},
-            })
+            orchestrator._on_tool_call_requested(
+                {
+                    "id": "c1",
+                    "name": "grep_knowledge",
+                    "arguments": {"pattern": long1},
+                }
+            )
+            orchestrator._on_tool_call_requested(
+                {
+                    "id": "c2",
+                    "name": "grep_knowledge",
+                    "arguments": {"pattern": long2},
+                }
+            )
         # Combined length > 40, should show count
         orchestrator._output_overlay.set_status.assert_called_with("搜索2个关键词中...")
 
@@ -647,15 +688,21 @@ class TestAgentStatus:
     def test_mixed_tools_show_both(self, orchestrator):
         """Mixed grep + other tools show both search and tool name."""
         with patch("main.grep_knowledge", return_value="found"):
-            orchestrator._on_tool_call_requested({
-                "id": "c1", "name": "grep_knowledge",
-                "arguments": {"pattern": "config"},
-            })
+            orchestrator._on_tool_call_requested(
+                {
+                    "id": "c1",
+                    "name": "grep_knowledge",
+                    "arguments": {"pattern": "config"},
+                }
+            )
         with patch("main.read_file", return_value="content"):
-            orchestrator._on_tool_call_requested({
-                "id": "c2", "name": "read_file",
-                "arguments": {"file_path": "test.txt"},
-            })
+            orchestrator._on_tool_call_requested(
+                {
+                    "id": "c2",
+                    "name": "read_file",
+                    "arguments": {"file_path": "test.txt"},
+                }
+            )
         # Last call should show both
         orchestrator._output_overlay.set_status.assert_called_with("搜索config... | read_file")
 

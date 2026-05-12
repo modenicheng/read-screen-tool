@@ -50,6 +50,45 @@ _OCR_PROMPT_TEMPLATE = (
 )
 
 _NO_OCR_PROMPT = "No text was detected in the selected region."
+_MAX_TOOL_RESULT_CHARS = 30_000
+
+
+def _coerce_int_arg(
+    value: Any,
+    default: int,
+    *,
+    min_value: int,
+    max_value: int,
+) -> int:
+    """Convert model-supplied integer arguments into safe bounded values."""
+    try:
+        number = int(value) if value is not None else default
+    except (TypeError, ValueError):
+        number = default
+    return max(min_value, min(number, max_value))
+
+
+def _optional_int_arg(value: Any, *, min_value: int, max_value: int) -> int | None:
+    """Convert optional integer tool args, preserving missing/invalid values as None."""
+    if value is None:
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return max(min_value, min(number, max_value))
+
+
+def _bounded_tool_result(result: str) -> str:
+    """Keep any single tool result from flooding the conversation context."""
+    if len(result) <= _MAX_TOOL_RESULT_CHARS:
+        return result
+    return (
+        result[:_MAX_TOOL_RESULT_CHARS].rstrip()
+        + "\n\n[Tool result truncated to "
+        + f"{_MAX_TOOL_RESULT_CHARS} characters. "
+        + "Use a narrower query/range if more detail is needed.]"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -63,10 +102,14 @@ class _OcrWorker:
     def __init__(self, ocr_engine: OcrEngine) -> None:
         self._ocr_engine = ocr_engine
 
-    def process(self, image: np.ndarray,
-                on_completed: Callable[[str], None],
-                on_failed: Callable[[str], None]) -> None:
+    def process(
+        self,
+        image: np.ndarray,
+        on_completed: Callable[[str], None],
+        on_failed: Callable[[str], None],
+    ) -> None:
         """Run OCR in a daemon thread, callback on tkinter main thread."""
+
         def _do_ocr() -> None:
             try:
                 logger.info(
@@ -80,6 +123,7 @@ class _OcrWorker:
             except Exception as exc:
                 err_msg = str(exc)
                 _get_root().after_idle(lambda: on_failed(err_msg))
+
         threading.Thread(target=_do_ocr, daemon=True).start()
 
 
@@ -253,7 +297,9 @@ class ReadScreenApp:
         """
         logger.info(
             "[MAIN] _queue_screenshot() — shape=%s, dtype=%s, processing=%s",
-            image.shape, image.dtype, self._processing,
+            image.shape,
+            image.dtype,
+            self._processing,
         )
 
         # Save screenshot backup to temp directory
@@ -276,7 +322,8 @@ class ReadScreenApp:
         if self._processing or self._pending_screenshot is None:
             logger.debug(
                 "[MAIN] _try_process_next() — skipped (processing=%s, pending=%s)",
-                self._processing, self._pending_screenshot is not None,
+                self._processing,
+                self._pending_screenshot is not None,
             )
             return
         self._processing = True
@@ -286,7 +333,9 @@ class ReadScreenApp:
 
         logger.info(
             "[MAIN] _try_process_next() — processing image shape=%s, vision=%s, ocr_worker=%s",
-            image.shape, self._model.vision, self._ocr_worker is not None,
+            image.shape,
+            self._model.vision,
+            self._ocr_worker is not None,
         )
 
         # Show "Thinking..." status while waiting for LLM/OCR
@@ -336,7 +385,8 @@ class ReadScreenApp:
         """
         logger.info(
             "[MAIN] _on_response_complete() — text_len=%d, pending_responses=%d",
-            len(text), self._pending_responses,
+            len(text),
+            self._pending_responses,
         )
         self._output_overlay.clear_status()
         self._pending_tool_info = []
@@ -428,6 +478,14 @@ class ReadScreenApp:
         if status:
             self._output_overlay.set_status(status)
 
+    def _submit_tool_result(self, tool_call: dict[str, Any], result: str) -> None:
+        """Submit one tool result and update batching/status bookkeeping."""
+        tc_id = str(tool_call.get("id", ""))
+        self._llm_client.submit_tool_result(tc_id, _bounded_tool_result(result))
+        self._tool_calls_pending += 1
+        self._pending_tool_info.append(tool_call)
+        self._update_agent_status()
+
     def _on_tool_call_requested(self, tool_call: dict[str, Any]) -> None:
         """Dispatch tool calls from the LLM.
 
@@ -451,8 +509,8 @@ class ReadScreenApp:
 
         if name == "grep_knowledge":
             pattern = str(args.get("pattern", ""))
-            max_results = int(args.get("max_results", 20))
-            context_lines = int(args.get("context_lines", 2))
+            max_results = _coerce_int_arg(args.get("max_results"), 20, min_value=1, max_value=20)
+            context_lines = _coerce_int_arg(args.get("context_lines"), 2, min_value=0, max_value=20)
             knowledge_dir = self._config.knowledge.directory
 
             result = grep_knowledge(
@@ -464,25 +522,43 @@ class ReadScreenApp:
 
             logger.info(
                 "[TOOL] grep_knowledge result — pattern=%r, result_len=%d, preview=%r",
-                pattern, len(result), result[:200],
+                pattern,
+                len(result),
+                result[:200],
             )
-            self._llm_client.submit_tool_result(tc_id, result)
-            self._tool_calls_pending += 1
-            self._pending_tool_info.append(tool_call)
-            self._update_agent_status()
+            self._submit_tool_result(tool_call, result)
 
         elif name == "read_file":
             file_path = str(args.get("file_path", ""))
-            result = read_file(file_path=file_path, allowed_dirs=allowed_dirs)
+            query_arg = args.get("query")
+            query = str(query_arg) if query_arg not in (None, "") else None
+            context_lines = _coerce_int_arg(
+                args.get("context_lines"), 20, min_value=0, max_value=100
+            )
+            start_line = _optional_int_arg(
+                args.get("start_line"), min_value=1, max_value=10_000_000
+            )
+            end_line = _optional_int_arg(args.get("end_line"), min_value=1, max_value=10_000_000)
+            max_chars = _coerce_int_arg(
+                args.get("max_chars"), 12_000, min_value=200, max_value=50_000
+            )
+            result = read_file(
+                file_path=file_path,
+                allowed_dirs=allowed_dirs,
+                query=query,
+                context_lines=context_lines,
+                start_line=start_line,
+                end_line=end_line,
+                max_chars=max_chars,
+            )
 
             logger.info(
                 "[TOOL] read_file result — path=%r, result_len=%d, preview=%r",
-                file_path, len(result), result[:200],
+                file_path,
+                len(result),
+                result[:200],
             )
-            self._llm_client.submit_tool_result(tc_id, result)
-            self._tool_calls_pending += 1
-            self._pending_tool_info.append(tool_call)
-            self._update_agent_status()
+            self._submit_tool_result(tool_call, result)
 
         elif name == "write_file":
             file_path = str(args.get("file_path", ""))
@@ -491,38 +567,30 @@ class ReadScreenApp:
 
             logger.info(
                 "[TOOL] write_file result — path=%r, content_len=%d, result=%r",
-                file_path, len(content), result,
+                file_path,
+                len(content),
+                result,
             )
-            self._llm_client.submit_tool_result(tc_id, result)
-            self._tool_calls_pending += 1
-            self._pending_tool_info.append(tool_call)
-            self._update_agent_status()
+            self._submit_tool_result(tool_call, result)
 
         elif name == "web_search":
             query = str(args.get("query", ""))
-            max_results = int(args.get("max_results", 8))
+            max_results = _coerce_int_arg(args.get("max_results"), 8, min_value=1, max_value=10)
             result = web_search(query=query, max_results=max_results)
 
             logger.info(
                 "[TOOL] web_search result — query=%r, result_len=%d, preview=%r",
-                query, len(result), result[:200],
+                query,
+                len(result),
+                result[:200],
             )
-            self._llm_client.submit_tool_result(tc_id, result)
-            self._tool_calls_pending += 1
-            self._pending_tool_info.append(tool_call)
-            self._update_agent_status()
+            self._submit_tool_result(tool_call, result)
 
         else:
             logger.warning("Unknown tool call: %s", name)
             error_result = f"Tool '{name}' is not available."
             logger.info("[TOOL] unknown tool result — name=%r, result=%r", name, error_result)
-            self._llm_client.submit_tool_result(
-                tc_id,
-                error_result,
-            )
-            self._tool_calls_pending += 1
-            self._pending_tool_info.append(tool_call)
-            self._update_agent_status()
+            self._submit_tool_result(tool_call, error_result)
 
     # -----------------------------------------------------------------------
     # Lifecycle
